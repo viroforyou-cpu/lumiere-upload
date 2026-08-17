@@ -1,0 +1,2915 @@
+diff --git a/.gitignore b/.gitignore
+index 335ec95..c50fe52 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1 +1,2 @@
+ *.tar.gz
++*.zip
+diff --git a/Lumiere-pos/dashboard/app.js b/Lumiere-pos/dashboard/app.js
+index 8598ca8..202ffab 100644
+--- a/Lumiere-pos/dashboard/app.js
++++ b/Lumiere-pos/dashboard/app.js
+@@ -12,8 +12,10 @@
+   var analyticsQueries = null;
+   var analyticsDraft = null;
+   var lastQueryResult = null;
++  var nlText = "";
+   var editTarget = null;
+   var searchQ = "";
++  var apptViewDate = "";
+   var checkout = { client: "", stylist: "", assistant: "", lines: [], payments: {} };
+ 
+   try { lang = localStorage.getItem("lumiere_lang") || "en"; } catch (e) {}
+@@ -22,7 +24,7 @@
+   var D = loadData();
+   var state = { today: D.meta.today, weekStart: D.meta.weekStart, weekEnd: D.meta.weekEnd };
+ 
+-  var OWNER_SECTIONS = ["week", "month", "commission", "reports", "analytics", "rules"];
++  var OWNER_SECTIONS = ["week", "month", "commission", "reports", "analytics", "rules", "data", "care"];
+   var PUBLIC_SECTIONS = ["today", "appointments", "checkout", "clients", "staff", "services", "products", "sales"];
+ 
+   function isObj(x) { return x && typeof x === "object" && !Array.isArray(x); }
+@@ -50,7 +52,12 @@
+   }
+ 
+   function canSee(s) {
+-    if (role === "receptionist") return PUBLIC_SECTIONS.indexOf(s) > -1;
++    if (role === "receptionist") {
++      if (s === "today") return true;
++      var allowed = D.settings.receptionistSections;
++      if (allowed) return allowed.indexOf(s) > -1;
++      return PUBLIC_SECTIONS.indexOf(s) > -1;
++    }
+     return true;
+   }
+   function canEdit() { return role === "owner" || role === "admin"; }
+@@ -131,7 +138,7 @@
+ 
+   function statusBadge(status) {
+     var map = {
+-      booked: "gold", done: "ok", "no-show": "danger", paid: "ok",
++      booked: "gold", done: "ok", "no-show": "danger", cancelled: "dim", paid: "ok",
+       pending: "warn", active: "ok", archived: "dim", briefed: "warn",
+       approved: "ok", morning: "gold", afternoon: "warn"
+     };
+@@ -415,6 +422,30 @@
+     return isNaN(v) ? (fallback || 0) : v;
+   }
+ 
++  function toast(msg) {
++    try {
++      if (typeof document === "undefined" || !document.body) return;
++      var wrap = document.getElementById("toastWrap");
++      if (!wrap) {
++        wrap = document.createElement("div");
++        wrap.id = "toastWrap";
++        wrap.className = "toast-wrap";
++        document.body.appendChild(wrap);
++      }
++      var el = document.createElement("div");
++      el.className = "toast";
++      el.textContent = msg;
++      wrap.appendChild(el);
++      if (el.classList) { el.classList.add("show"); }
++      setTimeout(function () { if (el.classList) el.classList.remove("show"); if (el.remove) el.remove(); }, 2600);
++    } catch (e) {}
++  }
++
++  function confirmDelete(label) {
++    try { return confirm(t("delete_confirm") + "\n" + (label || "")); }
++    catch (e) { return true; }
++  }
++
+   function renderClientForm() {
+     var c = editTarget.id ? clientById(editTarget.id) : null;
+     var mode = editTarget.mode;
+@@ -499,6 +530,20 @@
+       html += '<div class="card"><h3>' + t("pending") + '</h3></div>';
+     }
+ 
++    var todayApps = D.appointments.filter(function (a) { return a.date === state.today && a.status === "booked"; })
++      .sort(function (a, b) { return a.time < b.time ? -1 : 1; });
++    if (todayApps.length) {
++      var apptRows = [[t("time"), t("client"), t("services"), t("staff")]];
++      todayApps.forEach(function (a) {
++        apptRows.push([a.time,
++          esc((clientById(a.client) || {}).name || a.client),
++          svcName(a.service),
++          esc((staffById(a.stylist) || {}).name || a.stylist)]);
++      });
++      html += sectionTitle("🕐 " + t("today_schedule"));
++      html += table(apptRows, { numCols: [0] });
++    }
++
+     html += sectionTitle("🏆 " + t("top_clients"));
+     html += table(renderTopClients(D.tickets.filter(function (t) { return t.date === state.today; })), { numCols: [1] });
+     return html;
+@@ -650,31 +695,79 @@
+     return rows;
+   }
+ 
++  function appointmentById(id) { return D.appointments.find(function (a) { return a.id === id; }); }
++
++  function renderAppointmentForm() {
++    var a = editTarget.id ? appointmentById(editTarget.id) : null;
++    var title = editTarget.mode === "edit"
++      ? t("edit") + " — " + esc((a && clientById(a.client) ? clientById(a.client).name : "") + " · " + (a ? a.time : ""))
++      : t("new_appointment");
++    var body =
++      field(t("appt_date"), '<input id="apDate" type="date" value="' + esc(a ? a.date : (apptViewDate || state.today)) + '">') +
++      field(t("time"), '<input id="apTime" type="time" value="' + esc(a ? a.time : "") + '">') +
++      field(t("client"), '<select id="apClient">' + D.clients.map(function (c) {
++        return '<option value="' + c.id + '"' + (a && a.client === c.id ? " selected" : "") + '>' + esc(c.name) + '</option>';
++      }).join("") + '</select>') +
++      field(t("services"), '<select id="apSvc">' + Object.keys(D.services).map(function (k) {
++        return '<option value="' + k + '"' + (a && a.service === k ? " selected" : "") + '>' + esc(svcName(k)) + '</option>';
++      }).join("") + '</select>') +
++      field(t("staff"), '<select id="apStylist">' + D.staff.filter(function (s) { return s.role === "stylist" && s.status !== "archived"; }).map(function (s) {
++        return '<option value="' + s.id + '"' + (a && a.stylist === s.id ? " selected" : "") + '>' + esc(s.name) + '</option>';
++      }).join("") + '</select>') +
++      (editTarget.mode === "edit" ? field(t("status"), '<select id="apStatus"><option value="booked"' + (a && a.status === "booked" ? " selected" : "") + '>' + t("booked") + '</option><option value="done"' + (a && a.status === "done" ? " selected" : "") + '>' + t("done") + '</option><option value="no-show"' + (a && a.status === "no-show" ? " selected" : "") + '>' + t("appt_status_noshow") + '</option><option value="cancelled"' + (a && a.status === "cancelled" ? " selected" : "") + '>' + t("appt_status_cancelled") + '</option></select>') : "");
++    var actions =
++      '<button class="btn" onclick="Lumiere.saveAppointment()">' + t("save") + '</button>' +
++      '<button class="btn ghost" onclick="Lumiere.cancelForm()">' + t("cancel") + '</button>';
++    return formCard(title, '<div class="form-row">' + body + '</div>' +
++      '<span id="apMsg" class="muted" style="margin-top:8px;display:block"></span>', actions);
++  }
++
+   function renderAppointments() {
++    var date = apptViewDate || state.today;
+     var html = '<div class="toolbar">' +
+       '<h2>🕐 ' + t("sec_appointments") + '</h2>' +
+       '<span class="spacer"></span>' +
+-      '<input type="date" id="apptDate" value="' + state.today + '" style="width:160px">' +
+-      '<button class="btn" onclick="Lumiere.newAppointment()">' + icon("plus", 14) + ' ' + t("new_appointment") + '</button>' +
++      '<input type="date" id="apptDate" value="' + date + '" style="width:160px">' +
++      '<button class="btn" onclick="Lumiere.startAppointmentForm()">' + icon("plus", 14) + ' ' + t("new_appointment") + '</button>' +
+       '</div>';
+ 
+-    var apps = D.appointments.filter(function (a) { return a.date >= state.today; })
+-      .sort(function (a, b) { return (a.date + a.time) < (b.date + b.time) ? -1 : 1; });
++    if (editTarget && editTarget.kind === "appointment") html += renderAppointmentForm();
++
++    var apps = D.appointments.filter(function (a) { return a.date === date; })
++      .sort(function (a, b) { return a.time < b.time ? -1 : 1; });
+ 
+     if (!apps.length) return html + '<div class="card"><h3>' + t("pending") + '</h3></div>';
+ 
+     html += '<div class="card"><div class="appointment-row" style="color:var(--text-dim);font-weight:600;text-transform:uppercase;font-size:12px">' +
+-      '<div>' + t("time") + '</div><div>' + t("client") + '</div><div>' + t("services") + '</div><div>' + t("staff") + '</div><div>' + t("status") + '</div></div>';
++      '<div>' + t("time") + '</div><div>' + t("client") + '</div><div>' + t("services") + '</div><div>' + t("staff") + '</div><div>' + t("status") + '</div><div></div></div>';
+ 
++    var counts = { booked: 0, done: 0, "no-show": 0, cancelled: 0 };
+     apps.forEach(function (a) {
++      if (counts[a.status] !== undefined) counts[a.status]++;
+       var c = clientById(a.client), s = staffById(a.stylist);
++      var actions = "";
++      if (a.status === "booked") {
++        actions += '<button class="btn ok sm" title="' + esc(t("done")) + '" onclick="Lumiere.setAppointmentStatus(\'' + a.id + '\',\'done\')">✓</button> ' +
++          '<button class="btn warn sm" title="' + esc(t("appt_status_noshow")) + '" onclick="Lumiere.setAppointmentStatus(\'' + a.id + '\',\'no-show\')">✕</button>';
++      }
++      actions += ' <button class="btn ghost sm" title="' + esc(t("edit")) + '" onclick="Lumiere.startAppointmentForm(\'edit\',\'' + a.id + '\')">' + icon("edit", 13) + '</button>';
++      if (a.status !== "cancelled") {
++        actions += ' <button class="btn danger sm" title="' + esc(t("appt_status_cancelled")) + '" onclick="Lumiere.cancelAppointment(\'' + a.id + '\')">✖</button>';
++      }
+       html += '<div class="appointment-row">' +
+-        '<div class="time">' + esc(a.date.slice(5) + " · " + a.time) + '</div>' +
++        '<div class="time">' + esc(a.time) + '</div>' +
+         '<div>' + esc(c ? c.name : a.client) + '</div>' +
+         '<div>' + svcName(a.service) + '</div>' +
+         '<div>' + esc(s ? s.name : a.stylist) + '</div>' +
+-        '<div>' + statusBadge(a.status) + '</div></div>';
++        '<div>' + statusBadge(a.status) + '</div>' +
++        '<div style="display:flex;gap:6px">' + actions + '</div></div>';
+     });
++
++    html += '<div class="appt-summary">' + t("appt_total") + ' ' + apps.length +
++      ' · ' + t("booked") + ' ' + counts.booked +
++      ' · ' + t("done") + ' ' + counts.done +
++      ' · ' + t("appt_status_noshow") + ' ' + counts["no-show"] +
++      ' · ' + t("appt_status_cancelled") + ' ' + counts.cancelled + '</div>';
+     return html + '</div>';
+   }
+ 
+@@ -785,6 +878,7 @@
+     checkout = { client: "", stylist: "", assistant: "", lines: [], payments: {} };
+     save();
+     msg.textContent = t("saved");
++    toast(t("saved"));
+     sec = "sales";
+     render();
+   }
+@@ -793,6 +887,7 @@
+     var html = '<div class="toolbar"><h2>👥 ' + t("sec_clients") + '</h2>' +
+       '<span class="spacer"></span>' +
+       '<div class="search-box">' + icon("search", 14) + '<input id="clientSearch" type="text" placeholder="' + esc(t("client_search_ph")) + '" oninput="Lumiere.filterClients(this.value)"></div>' +
++      '<button class="btn ghost" onclick="Lumiere.exportClientsCSV()">⬇ ' + t("data_export_clients") + '</button>' +
+       '<button class="btn" onclick="Lumiere.startClientForm()">' + icon("plus", 14) + ' ' + t("add_client") + '</button></div>';
+ 
+     if (editTarget && editTarget.kind === "client") html += renderClientForm();
+@@ -817,7 +912,7 @@
+     if (canEdit()) {
+       html += '<button class="btn" onclick="Lumiere.startStaffForm()">' + icon("plus", 14) + ' ' + t("add_staff") + '</button>';
+     }
+-    html += '</div>';
++    html += '<button class="btn ghost" onclick="Lumiere.exportStaffCSV()">⬇ ' + t("data_export_staff") + '</button></div>';
+ 
+     if (editTarget && editTarget.kind === "staff") html += renderStaffForm();
+ 
+@@ -853,8 +948,20 @@
+     return html + table(rows, { numCols: [3] });
+   }
+ 
++  function lowStockItems() {
++    var out = [];
++    Object.keys(D.products).forEach(function (k) {
++      var p = D.products[k];
++      if (p.stock <= p.reorder) out.push([k, p]);
++    });
++    return out.sort(function (a, b) { return (a[1].stock - a[1].reorder) - (b[1].stock - b[1].reorder); });
++  }
++
+   function renderProducts() {
++    var low = lowStockItems();
+     var html = '<div class="toolbar"><h2>🧴 ' + t("sec_products") + '</h2><span class="spacer"></span>';
++    if (low.length) html += '<span class="badge danger" style="margin-right:8px">⚠ ' + t("low") + ' ' + low.length + '</span>';
++    html += '<button class="btn ghost" onclick="Lumiere.exportProductsCSV()">⬇ ' + t("data_export_products") + '</button>';
+     if (canEdit()) {
+       html += '<button class="btn" onclick="Lumiere.startProductForm()">' + icon("plus", 14) + ' ' + t("btn_new_product") + '</button>';
+     }
+@@ -862,15 +969,30 @@
+ 
+     if (editTarget && editTarget.kind === "product") html += renderProductForm();
+ 
++    if (low.length) {
++      html += '<div class="card reorder-panel"><h3>📦 ' + t("reorder_list") + ' (' + low.length + ')</h3>';
++      low.forEach(function (it) {
++        var k = it[0], p = it[1];
++        html += '<div class="reorder-row">' +
++          '<span class="reorder-name">' + esc(prodName(k)) + '</span>' +
++          '<span class="muted">' + t("stock") + ': ' + p.stock + ' · ' + t("reorder") + ': ' + p.reorder + '</span>' +
++          (canEdit() ? '<button class="btn ghost sm" onclick="Lumiere.restockProduct(\'' + k + '\')">' + icon("plus", 13) + ' ' + t("restock") + '</button>' : '') +
++          '</div>';
++      });
++      html += '</div>';
++    }
++
+     var rows = [["", t("name"), t("price"), t("stock"), t("reorder"), t("status"), ""]];
+     Object.keys(D.products).forEach(function (k) {
+       var p = D.products[k];
+-      var low = p.stock <= p.reorder;
+-      var actions = canEdit()
+-        ? '<button class="btn ghost sm" onclick="Lumiere.startProductForm(\'edit\',\'' + k + '\')">' + icon("edit", 13) + '</button> ' +
+-          '<button class="btn danger sm" onclick="Lumiere.deleteProduct(\'' + k + '\')">' + icon("trash", 13) + '</button>'
+-        : "";
+-      rows.push([k, prodName(k), ars(p.price_ars), p.stock, p.reorder, low ? '<span class="badge danger">' + t("low") + '</span>' : '<span class="badge ok">' + t("ok") + '</span>', actions]);
++      var lowRow = p.stock <= p.reorder;
++      var actions = "";
++      if (canEdit()) {
++        actions += '<button class="btn ghost sm" onclick="Lumiere.startProductForm(\'edit\',\'' + k + '\')">' + icon("edit", 13) + '</button> ';
++        if (lowRow) actions += '<button class="btn warn sm" title="' + esc(t("restock")) + '" onclick="Lumiere.restockProduct(\'' + k + '\')">+</button> ';
++        actions += '<button class="btn danger sm" onclick="Lumiere.deleteProduct(\'' + k + '\')">' + icon("trash", 13) + '</button>';
++      }
++      rows.push([k, prodName(k), ars(p.price_ars), p.stock, p.reorder, lowRow ? '<span class="badge danger">' + t("low") + '</span>' : '<span class="badge ok">' + t("ok") + '</span>', actions]);
+     });
+     return html + table(rows, { numCols: [1, 2, 3] });
+   }
+@@ -905,6 +1027,96 @@
+     return html;
+   }
+ 
++  function clientLastVisit(c) {
++    var v = (c.visits || []).slice().sort();
++    return v.length ? v[v.length - 1] : (c.first_visit || "");
++  }
++
++  function renderCare() {
++    var html = '<div class="toolbar"><h2>💖 ' + t("sec_care") + '</h2></div>';
++    html += '<p class="muted" style="margin-bottom:16px">' + t("care_note") + '</p>';
++
++    var dueDays = 30;
++    var due = D.clients.filter(function (c) {
++      var last = clientLastVisit(c);
++      return !!last && daysBetween(last, state.today) > dueDays;
++    }).sort(function (a, b) {
++      return daysBetween(clientLastVisit(b), state.today) - daysBetween(clientLastVisit(a), state.today);
++    });
++
++    html += sectionTitle("⏰ " + t("care_due_title") + " (> " + dueDays + "d)");
++    if (due.length) {
++      var dueRows = [[t("client"), t("care_last_visit"), t("care_days_since"), t("visits")]];
++      due.forEach(function (c) {
++        var last = clientLastVisit(c);
++        dueRows.push([esc(c.name), last, daysBetween(last, state.today), (c.visits || []).length]);
++      });
++      html += table(dueRows, { numCols: [2, 3] });
++    } else {
++      html += '<div class="card"><h3>' + t("care_none_due") + '</h3></div>';
++    }
++
++    var ns = {};
++    D.appointments.forEach(function (a) {
++      if (a.status === "no-show") ns[a.client] = (ns[a.client] || 0) + 1;
++    });
++    var nsArr = Object.keys(ns).map(function (k) { return { id: k, n: ns[k] }; }).sort(function (a, b) { return b.n - a.n; });
++
++    html += sectionTitle("🚫 " + t("care_noshow_title"));
++    if (nsArr.length) {
++      var nsRows = [[t("client"), t("care_noshows")]];
++      nsArr.forEach(function (x) {
++        var c = clientById(x.id);
++        nsRows.push([esc(c ? c.name : x.id), x.n]);
++      });
++      html += table(nsRows, { numCols: [1] });
++    } else {
++      html += '<div class="card"><h3>' + t("care_none_noshow") + '</h3></div>';
++    }
++
++    var byC = groupBy(D.tickets, function (t) { return t.client; });
++    var spend = Object.keys(byC).map(function (k) {
++      var c = clientById(k);
++      return { id: k, name: c ? c.name : k, spend: sum(byC[k].map(ticketTotal)), visits: c ? (c.visits || []).length : byC[k].length };
++    }).sort(function (a, b) { return b.spend - a.spend; }).slice(0, 6);
++
++    html += sectionTitle("👑 " + t("care_vip_title"));
++    var vipRows = [["#", t("client"), t("visits"), t("total") + " ARS"]];
++    spend.forEach(function (s, i) {
++      vipRows.push(["#" + (i + 1), esc(s.name), s.visits, ars(s.spend)]);
++    });
++    html += table(vipRows, { numCols: [2, 3] });
++
++    return html;
++  }
++
++  function renderData() {
++    var html = '<div class="toolbar"><h2>🗄️ ' + t("sec_data") + '</h2></div>';
++    html += '<p class="muted" style="margin-bottom:16px">' + t("data_note") + '</p>';
++
++    html += '<div class="grid cols-2">';
++
++    html += '<div class="card"><h3>💾 ' + t("data_backup") + '</h3>';
++    html += '<p class="muted">' + t("data_backup_desc") + '</p>';
++    html += '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
++      '<button class="btn" onclick="Lumiere.exportBackup()">⬇ ' + t("data_backup") + ' (.json)</button>' +
++      '<button class="btn ghost" onclick="Lumiere.exportMarkdown()">📄 ' + t("data_export_md") + '</button></div></div>';
++
++    html += '<div class="card"><h3>📥 ' + t("data_restore") + '</h3>';
++    html += '<p class="muted">' + t("data_import_hint") + '</p>';
++    html += '<div class="form-row" style="grid-template-columns:1fr auto;align-items:end">' +
++      '<input type="file" id="dataImport" accept="application/json,.json">' +
++      '<button class="btn" onclick="Lumiere.importBackup()">' + t("data_restore") + '</button></div>' +
++      '<span id="dataMsg" class="muted" style="display:block;margin-top:8px"></span></div>';
++
++    html += '<div class="card"><h3>🔄 ' + t("data_reset") + '</h3>';
++    html += '<p class="muted">' + t("data_reset_desc") + '</p>';
++    html += '<button class="btn danger" onclick="Lumiere.resetData()">' + t("data_reset") + '</button></div>';
++
++    html += '</div>';
++    return html;
++  }
++
+   /* ------------------------- Analytics ------------------------- */
+ 
+   function bucketsFor(period) {
+@@ -953,7 +1165,11 @@
+     returning: { money: false },
+     new_clients: { money: false },
+     product_qty: { money: false },
+-    commission: { money: true }
++    commission: { money: true },
++    services_rev: { money: true },
++    products_rev: { money: true },
++    returning_rate: { money: false },
++    avg_frequency: { money: false }
+   };
+ 
+   var WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+@@ -966,6 +1182,12 @@
+     return Math.round(sv * r.service / 100 + pr * r.product / 100 + sv * a.service / 100 + pr * a.product / 100);
+   }
+ 
++  function distinctClients(tickets) {
++    var seen = {};
++    tickets.forEach(function (t) { seen[t.client] = true; });
++    return Object.keys(seen).length;
++  }
++
+   function metricValue(metric, tickets, from, to) {
+     var rev = sum(tickets.map(ticketTotal));
+     switch (metric) {
+@@ -978,6 +1200,14 @@
+         return tickets.filter(function (t) { var c = clientById(t.client); return !!(c && c.first_visit === t.date); }).length;
+       case "product_qty": return sum(tickets.map(function (t) { return sum(ticketProducts(t).map(function (l) { return l.q; })); }));
+       case "commission": return sum(tickets.map(ticketCommission));
++      case "services_rev": return sum(tickets.map(function (t) { return sum(ticketServices(t).map(lineTotal)); }));
++      case "products_rev": return sum(tickets.map(function (t) { return sum(ticketProducts(t).map(lineTotal)); }));
++      case "returning_rate":
++        return tickets.length ? Math.round(tickets.filter(isReturning).length / tickets.length * 100) : 0;
++      case "avg_frequency": {
++        var dc = distinctClients(tickets);
++        return dc ? Math.round(tickets.length / dc * 10) / 10 : 0;
++      }
+     }
+     return 0;
+   }
+@@ -1137,8 +1367,12 @@
+       ["visits", "🧾 " + t("metric_visits")],
+       ["avg_ticket", "🎟️ " + t("metric_avg_ticket")],
+       ["returning", "🔁 " + t("metric_returning")],
++      ["returning_rate", "🔁 " + t("metric_returning_rate") + " %"],
+       ["new_clients", "🆕 " + t("metric_new_clients")],
++      ["avg_frequency", "👥 " + t("metric_avg_frequency")],
+       ["product_qty", "🧴 " + t("metric_product_qty")],
++      ["services_rev", "✂️ " + t("metric_services_rev")],
++      ["products_rev", "🧴 " + t("metric_products_rev")],
+       ["commission", "💵 " + t("metric_commission")]
+     ];
+   }
+@@ -1189,6 +1423,40 @@
+     }).join("") + '</select>');
+   }
+ 
++  function nlSuggestList() {
++    return lang === "es" ? [
++      "Ingresos por servicio este mes",
++      "Visitas por equipo esta semana",
++      "Ticket promedio por día últimos 30 días",
++      "Comisiones por equipo este mes",
++      "Ingresos por método de pago este mes",
++      "Clientes nuevos este mes"
++    ] : [
++      "Revenue by service this month",
++      "Visits by staff this week",
++      "Average ticket by day last 30 days",
++      "Commission by staff this month",
++      "Revenue by payment method this month",
++      "New clients this month"
++    ];
++  }
++
++  function renderNLBox() {
++    var mic = NaturalQuery.speechSupported()
++      ? '<div class="form-field" style="align-self:end"><button class="btn ghost" id="nlMic" onclick="Lumiere.startVoice()">🎤 ' + t("nl_mic") + '</button></div>'
++      : "";
++    return '<div class="card nl-card"><h3>🎙 ' + t("nl_title") + '</h3>' +
++      '<div class="form-row" style="grid-template-columns:1fr auto auto;align-items:end">' +
++      '<div class="form-field full"><input id="nlInput" placeholder="' + esc(t("nl_placeholder")) + '" value="' + esc(nlText) + '" onkeydown="if(event.key===\'Enter\')Lumiere.runNaturalQuery()"></div>' +
++      '<div class="form-field" style="align-self:end"><button class="btn" onclick="Lumiere.runNaturalQuery()">⚡ ' + t("nl_run") + '</button></div>' +
++      mic +
++      '</div>' +
++      '<div class="nl-suggestions">' + nlSuggestList().map(function (x, i) {
++        return '<button class="chip" onclick="Lumiere.askNatural(' + i + ')">' + esc(x) + '</button>';
++      }).join("") + '</div>' +
++      '<div id="nlMsg"></div></div>';
++  }
++
+   function renderBuilder() {
+     var q = analyticsDraft || { metric: "revenue", dimension: "day", compare: "", chart: "auto", period: analyticsPeriod, staff: "", gender: "", payment: "", limit: 10 };
+     return '<div class="card"><h3>🧪 ' + t("analytics_builder") + '</h3>' +
+@@ -1293,7 +1561,11 @@
+ 
+   function renderQueryResult(q) {
+     var isMoney = METRICS[q.metric] && METRICS[q.metric].money;
+-    var fv = function (v) { return isMoney ? ars(v) : fmt(v); };
++    var fv = function (v) {
++      if (isMoney) return ars(v);
++      if (q.metric === "avg_frequency") return String(v);
++      return fmt(v);
++    };
+     if (q.chart === "heatmap") {
+       return '<div class="card chart-card"><h3>' + esc(queryTitle(q)) + '</h3>' + heatmapChartForQuery(q) + '</div>';
+     }
+@@ -1332,6 +1604,7 @@
+       periodSeg() +
+       '<button class="btn ghost" onclick="Lumiere.exportCSV()">⬇ ' + t("export_csv") + '</button></div>';
+     html += '<p class="muted" style="margin-bottom:16px">' + t("analytics_builder_note") + '</p>';
++    html += renderNLBox();
+     html += renderBuilder();
+ 
+     if (analyticsDraft) {
+@@ -1415,6 +1688,16 @@
+     });
+     html += '</div>';
+ 
++    html += '<div class="card"><h3>🔐 ' + t("receptionist_access") + '</h3>';
++    html += '<p class="muted">' + t("receptionist_access_note") + '</p>';
++    var rsAllowed = s.receptionistSections;
++    PUBLIC_SECTIONS.forEach(function (k) {
++      var on = rsAllowed ? rsAllowed.indexOf(k) > -1 : true;
++      html += '<label class="rule-row"><span>' + t("sec_" + k) + '</span>' +
++        '<input type="checkbox" id="rs_' + k + '"' + (on ? " checked" : "") + ' onchange="Lumiere.toggleReceptionistSection(\'' + k + '\',this.checked)"></label>';
++    });
++    html += '</div>';
++
+     html += '</div>';
+ 
+     html += sectionTitle("✨ " + t("custom_rules"));
+@@ -1531,7 +1814,9 @@
+     commission: renderCommissionRates,
+     reports: renderReports,
+     analytics: renderAnalytics,
+-    rules: renderRules
++    rules: renderRules,
++    data: renderData,
++    care: renderCare
+   };
+ 
+   /* ------------------------- Clock & open/closed ------------------------- */
+@@ -1657,8 +1942,9 @@
+     return s;
+   }
+ 
+-  function downloadFile(name, text) {
+-    var blob = new Blob([text], { type: "text/csv;charset=utf-8;" });
++  function downloadFile(name, text, mime) {
++    var type = mime || "text/csv;charset=utf-8;";
++    var blob = new Blob([text], { type: type });
+     var url = URL.createObjectURL(blob);
+     var a = document.createElement("a");
+     a.href = url;
+@@ -1682,17 +1968,198 @@
+     return rows.map(function (r) { return r.map(csvEscape).join(","); }).join("\n");
+   }
+ 
++  function buildClientsCSV() {
++    var rows = [["ID", "Name", "Line", "Phone", "First visit", "Visits"]];
++    D.clients.forEach(function (c) {
++      rows.push([c.id, c.name, t(c.gender_line === "men" ? "mens" : "womens"), c.phone || "", c.first_visit || "", (c.visits || []).join(" | ")]);
++    });
++    return rows.map(function (r) { return r.map(csvEscape).join(","); }).join("\n");
++  }
++
++  function buildStaffCSV() {
++    var rows = [["ID", "Name", "Role", "Shift", "Status"]];
++    D.staff.forEach(function (s) {
++      rows.push([s.id, s.name, s.role, s.shift || "", s.status || "active"]);
++    });
++    return rows.map(function (r) { return r.map(csvEscape).join(","); }).join("\n");
++  }
++
++  function buildProductsCSV() {
++    var rows = [["Key", "Name (EN)", "Name (ES)", "Price ARS", "Stock", "Reorder"]];
++    Object.keys(D.products).forEach(function (k) {
++      var p = D.products[k];
++      rows.push([k, p.name_en, p.name_es, p.price_ars, p.stock, p.reorder]);
++    });
++    return rows.map(function (r) { return r.map(csvEscape).join(","); }).join("\n");
++  }
++
++  function buildBackupJSON() {
++    return JSON.stringify({
++      app: "lumiere-pos", version: 1, exportedAt: new Date().toISOString(),
++      data: D,
++      analyticsQueries: analyticsQueries ? clone(analyticsQueries) : []
++    }, null, 2);
++  }
++
++  function buildMarkdown() {
++    var L = [];
++    var push = function () {
++      L.push.apply(L, Array.prototype.slice.call(arguments));
++      L.push("");
++    };
++    push("# Lumiere POS — Records export");
++    push("> Generated " + new Date().toLocaleString() + " · prices in ARS");
++
++    push("## Clients (" + D.clients.length + ")");
++    push("| ID | Name | Line | Phone | First visit | Visits |");
++    push("|---|---|---|---|---|---|");
++    D.clients.forEach(function (c) {
++      push("| " + c.id + " | " + c.name + " | " + (c.gender_line || "") + " | " + (c.phone || "") + " | " + (c.first_visit || "") + " | " + ((c.visits || []).length) + " |");
++    });
++
++    push("## Staff (" + D.staff.length + ")");
++    push("| ID | Name | Role | Shift | Status |");
++    push("|---|---|---|---|---|");
++    D.staff.forEach(function (s) {
++      push("| " + s.id + " | " + s.name + " | " + s.role + " | " + (s.shift || "") + " | " + (s.status || "active") + " |");
++    });
++
++    push("## Services (" + Object.keys(D.services).length + ")");
++    push("| Key | Name | Group | Price ARS |");
++    push("|---|---|---|---|");
++    Object.keys(D.services).forEach(function (k) {
++      push("| " + k + " | " + svcName(k) + " | " + D.services[k].group + " | " + D.services[k].price_ars + " |");
++    });
++
++    push("## Products (" + Object.keys(D.products).length + ")");
++    push("| Key | Name | Stock | Reorder | Price ARS |");
++    push("|---|---|---|---|---|");
++    Object.keys(D.products).forEach(function (k) {
++      var p = D.products[k];
++      push("| " + k + " | " + prodName(k) + " | " + p.stock + " | " + p.reorder + " | " + p.price_ars + " |");
++    });
++
++    var sales = D.tickets.slice().sort(function (a, b) { return a.date < b.date ? -1 : 1; });
++    push("## Sales (" + sales.length + ")");
++    push("| Date | Seq | Client | Stylist | Total ARS | Items |");
++    push("|---|---|---|---|---|---|");
++    sales.forEach(function (tk) {
++      var c = clientById(tk.client), s = staffById(tk.stylist);
++      var items = tk.lines.map(function (l) {
++        return (l.t === "service" ? svcName(l.k) : prodName(l.k)) + " x" + l.q;
++      }).join(", ");
++      push("| " + tk.date + " | " + tk.seq + " | " + (c ? c.name : tk.client) + " | " + (s ? s.name : tk.stylist) + " | " + ticketTotal(tk) + " | " + items + " |");
++    });
++
++    push("## Appointments (" + D.appointments.length + ")");
++    push("| Date | Time | Client | Stylist | Service | Status |");
++    push("|---|---|---|---|---|---|");
++    D.appointments.slice().sort(function (a, b) { return (a.date + a.time) < (b.date + b.time) ? -1 : 1; }).forEach(function (a) {
++      var c = clientById(a.client), s = staffById(a.stylist);
++      push("| " + a.date + " | " + a.time + " | " + (c ? c.name : a.client) + " | " + (s ? s.name : a.stylist) + " | " + svcName(a.service) + " | " + a.status + " |");
++    });
++
++    return L.join("\n");
++  }
++
+   /* ------------------------- window.Lumiere API ------------------------- */
+ 
+   window.Lumiere = {
+     navigate: navigate,
+-    newAppointment: function () { alert(t("demo_new_appt")); },
+ 
+     addCheckoutLine: addCheckoutLine,
+     removeCheckoutLine: removeCheckoutLine,
+     completeCheckout: completeCheckout,
+ 
+     exportCSV: function () { downloadFile("lumiere-sales.csv", buildSalesCSV()); },
++    exportClientsCSV: function () { downloadFile("lumiere-clients.csv", buildClientsCSV()); },
++    exportStaffCSV: function () { downloadFile("lumiere-staff.csv", buildStaffCSV()); },
++    exportProductsCSV: function () { downloadFile("lumiere-products.csv", buildProductsCSV()); },
++
++    exportBackup: function () { downloadFile("lumiere-backup.json", buildBackupJSON(), "application/json"); },
++    exportMarkdown: function () { downloadFile("lumiere-records.md", buildMarkdown(), "text/markdown;charset=utf-8"); },
++
++    importBackup: function () {
++      var input = document.getElementById("dataImport");
++      var file = input && input.files && input.files[0];
++      var msg = document.getElementById("dataMsg");
++      if (!file) { if (msg) msg.textContent = t("data_pick_file"); return; }
++      var reader = new FileReader();
++      reader.onload = function (ev) {
++        try {
++          var parsed = JSON.parse(ev.target.result);
++          var data = parsed.data || parsed;
++          if (!data.clients || !data.tickets || !data.staff || !data.services || !data.products) throw new Error("shape");
++          if (!data.settings || !data.meta) throw new Error("shape");
++          D = data;
++          if (parsed.analyticsQueries && Array.isArray(parsed.analyticsQueries)) {
++            analyticsQueries = clone(parsed.analyticsQueries);
++            saveQueries();
++          }
++          state.today = D.meta.today; state.weekStart = D.meta.weekStart; state.weekEnd = D.meta.weekEnd;
++          editTarget = null; checkout = { client: "", stylist: "", assistant: "", lines: [], payments: {} };
++          save();
++          if (msg) msg.textContent = t("data_restored");
++          render(); toast(t("data_restored"));
++        } catch (e) {
++          if (msg) msg.textContent = t("data_bad_file");
++        }
++      };
++      reader.readAsText(file);
++    },
++    resetData: function () {
++      if (!confirm(t("data_reset_confirm"))) return;
++      D = clone(SEED);
++      analyticsQueries = null;
++      apptViewDate = "";
++      state.today = D.meta.today; state.weekStart = D.meta.weekStart; state.weekEnd = D.meta.weekEnd;
++      editTarget = null; checkout = { client: "", stylist: "", assistant: "", lines: [], payments: {} };
++      save(); render(); toast(t("data_reset_done"));
++    },
++
++    restockProduct: function (k) {
++      var p = D.products[k];
++      if (!p) return;
++      p.stock = Math.max(p.reorder || D.settings.lowStockDefault || 5, 1) * 2;
++      save(); render(); toast(t("restocked"));
++    },
++
++    startAppointmentForm: function (mode, id) { editTarget = { kind: "appointment", mode: mode || "add", id: id || null }; render(); },
++    saveAppointment: function () {
++      var date = inputVal("apDate", "").trim();
++      var time = inputVal("apTime", "").trim();
++      var client = inputVal("apClient", "");
++      var service = inputVal("apSvc", "");
++      var stylist = inputVal("apStylist", "");
++      var msg = document.getElementById("apMsg");
++      var fail = function (m) { if (msg) msg.textContent = m; };
++      if (!date || !time) return fail(t("appt_need_date_time"));
++      var open = toMin(D.settings.openTime), close = toMin(D.settings.closeTime), tm = toMin(time);
++      if (tm < open || tm > close) return fail(t("appt_outside_hours"));
++      var exclude = editTarget.id || null;
++      var conflict = D.appointments.some(function (a) {
++        return a.id !== exclude && a.date === date && a.time === time && a.stylist === stylist && a.status !== "cancelled";
++      });
++      if (conflict) return fail(t("appt_conflict"));
++      if (editTarget.id) {
++        var a = appointmentById(editTarget.id);
++        if (a) {
++          a.date = date; a.time = time; a.client = client; a.service = service; a.stylist = stylist;
++          if (editTarget.mode === "edit") a.status = inputVal("apStatus", a.status);
++        }
++      } else {
++        D.appointments.push({ id: "app-" + Date.now(), date: date, time: time, client: client, stylist: stylist, service: service, status: "booked" });
++      }
++      apptViewDate = date;
++      save(); editTarget = null; render(); toast(t("saved_changes"));
++    },
++    setAppointmentStatus: function (id, status) {
++      var a = appointmentById(id);
++      if (!a) return;
++      a.status = status;
++      save(); render();
++    },
++    cancelAppointment: function (id) { this.setAppointmentStatus(id, "cancelled"); },
+ 
+     filterClients: function (q) {
+       searchQ = q || "";
+@@ -1722,11 +2189,13 @@
+       } else {
+         D.clients.push({ id: nextClientId(), name: name, gender_line: gender, phone: phone, first_visit: state.today, visits: [], status: "active" });
+       }
+-      save(); editTarget = null; render();
++      save(); editTarget = null; render(); toast(t("saved_changes"));
+     },
+     deleteClient: function (id) {
+-      D.clients = D.clients.filter(function (c) { return c.id !== id; });
+-      save(); render();
++      var c = clientById(id);
++      if (!confirmDelete(c ? c.name : id)) return;
++      D.clients = D.clients.filter(function (x) { return x.id !== id; });
++      save(); render(); toast(t("deleted"));
+     },
+ 
+     saveStaff: function () {
+@@ -1742,12 +2211,14 @@
+         var id = r + "-" + (String(D.staff.length + 1).padStart(3, "0")) + "-" + slug(name);
+         D.staff.push({ id: id, name: name, role: r, shift: sh, status: st });
+       }
+-      save(); editTarget = null; render();
++      save(); editTarget = null; render(); toast(t("saved_changes"));
+     },
+     deleteStaff: function (id) {
+-      D.staff = D.staff.filter(function (s) { return s.id !== id; });
++      var s = staffById(id);
++      if (!confirmDelete(s ? s.name : id)) return;
++      D.staff = D.staff.filter(function (x) { return x.id !== id; });
+       delete D.commissionRates[id];
+-      save(); render();
++      save(); render(); toast(t("deleted"));
+     },
+ 
+     saveService: function () {
+@@ -1764,11 +2235,12 @@
+         while (D.services[key]) key += "-" + Math.floor(Math.random() * 90 + 10);
+         D.services[key] = { name_en: nameEn, name_es: nameEs || nameEn, group: grp, price_ars: price };
+       }
+-      save(); editTarget = null; render();
++      save(); editTarget = null; render(); toast(t("saved_changes"));
+     },
+     deleteService: function (k) {
++      if (!confirmDelete(svcName(k))) return;
+       delete D.services[k];
+-      save(); render();
++      save(); render(); toast(t("deleted"));
+     },
+ 
+     saveProduct: function () {
+@@ -1786,11 +2258,12 @@
+         while (D.products[key]) key += "-" + Math.floor(Math.random() * 90 + 10);
+         D.products[key] = { name_en: nameEn, name_es: nameEs || nameEn, price_ars: price, stock: stock, reorder: reorder };
+       }
+-      save(); editTarget = null; render();
++      save(); editTarget = null; render(); toast(t("saved_changes"));
+     },
+     deleteProduct: function (k) {
++      if (!confirmDelete(prodName(k))) return;
+       delete D.products[k];
+-      save(); render();
++      save(); render(); toast(t("deleted"));
+     },
+ 
+     saveRates: function () {
+@@ -1799,7 +2272,16 @@
+         var pv = parseFloat(inputVal("rate_" + s.id + "_p", "0"));
+         D.commissionRates[s.id] = { service: isNaN(sv) ? 0 : sv, product: isNaN(pv) ? 0 : pv };
+       });
+-      save(); render();
++      save(); render(); toast(t("saved_changes"));
++    },
++
++    toggleReceptionistSection: function (secKey, checked) {
++      var list = D.settings.receptionistSections;
++      if (!Array.isArray(list)) list = D.settings.receptionistSections = PUBLIC_SECTIONS.slice();
++      var idx = list.indexOf(secKey);
++      if (checked && idx === -1) list.push(secKey);
++      if (!checked && idx > -1) list.splice(idx, 1);
++      save();
+     },
+ 
+     setAnalyticsPeriod: function (p) {
+@@ -1819,6 +2301,53 @@
+       lastQueryResult = analyticsGroups(analyticsDraft);
+       render();
+     },
++    runNaturalQuery: function () {
++      var input = document.getElementById("nlInput");
++      var text = (input ? input.value : "").trim();
++      if (!text) return;
++      var res = NaturalQuery.parse(text, D, lang);
++      if (!res || res.type !== "query") {
++        nlText = text;
++        render();
++        var msg = document.getElementById("nlMsg");
++        if (msg) msg.innerHTML = '<p class="muted">' + t("nl_unknown") + '</p><div class="nl-suggestions">' +
++          nlSuggestList().map(function (x, i) {
++            return '<button class="chip" onclick="Lumiere.askNatural(' + i + ')">' + esc(x) + '</button>';
++          }).join("") + '</div>';
++        return;
++      }
++      nlText = text;
++      analyticsDraft = res.q;
++      lastQueryResult = analyticsGroups(res.q);
++      render();
++      var msg2 = document.getElementById("nlMsg");
++      if (msg2) msg2.innerHTML = '<p class="nl-confirm">' + esc(res.summary) + '</p>';
++      toast(res.summary);
++    },
++    askNatural: function (i) {
++      var list = nlSuggestList();
++      if (!list[i]) return;
++      var input = document.getElementById("nlInput");
++      if (input) input.value = list[i];
++      this.runNaturalQuery();
++    },
++    startVoice: function () {
++      try {
++        if (!NaturalQuery.speechSupported()) { toast(t("nl_voice_unsupported")); return; }
++        var mic = document.getElementById("nlMic");
++        if (mic) mic.textContent = "⏺ " + t("nl_listening");
++        NaturalQuery.recognize(lang, function (txt) {
++          var input = document.getElementById("nlInput");
++          if (input) input.value = txt;
++          var m = document.getElementById("nlMsg");
++          if (m) m.innerHTML = "";
++          Lumiere.runNaturalQuery();
++        }, function () {
++          var micEl = document.getElementById("nlMic");
++          if (micEl) micEl.textContent = "🎤 " + t("nl_mic");
++        }, function () { toast(t("nl_error")); });
++      } catch (e) { toast(t("nl_error")); }
++    },
+     saveAnalyticsQuery: function () {
+       readDraftFromForm();
+       var q = { id: "q" + Date.now() };
+@@ -1906,7 +2435,7 @@
+ 
+   document.addEventListener("change", function (e) {
+     if (e.target && e.target.id === "apptDate") {
+-      state.today = e.target.value;
++      apptViewDate = e.target.value;
+       render();
+     }
+   });
+@@ -1930,6 +2459,14 @@
+ 
+   setInterval(updateClock, 1000);
+ 
++  if (typeof navigator !== "undefined" && "serviceWorker" in navigator &&
++      typeof location !== "undefined" &&
++      (location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1")) {
++    window.addEventListener("load", function () {
++      navigator.serviceWorker.register("sw.js").catch(function () {});
++    });
++  }
++
+   render();
+   updateClock();
+ })();
+diff --git a/Lumiere-pos/dashboard/data.js b/Lumiere-pos/dashboard/data.js
+index df0038f..388016f 100644
+--- a/Lumiere-pos/dashboard/data.js
++++ b/Lumiere-pos/dashboard/data.js
+@@ -14,6 +14,7 @@ window.LUMIERE_DATA = {
+     closedDays: [0],
+     nightCloseEnabled: false,
+     lowStockDefault: 5,
++    receptionistSections: ["today", "appointments", "checkout", "clients", "staff", "services", "products", "sales"],
+     predefinedRules: [
+       { key: "no_show_fee",    label_en: "Charge 50% on no-shows",            label_es: "Cobrar 50% por ausencia",       enabled: true },
+       { key: "retouch_free",   label_en: "Free retouch within 7 days",        label_es: "Retoque gratis dentro de 7 días", enabled: false },
+@@ -43,7 +44,7 @@ window.LUMIERE_DATA = {
+       returning_after_1_2_months: "Returning after 1 / 2 months",
+       new_visits: "New", return_visits: "Returning", services: "Services",
+       payment_split: "Payment split", week_label: "Week",
+-      mens: "Men", womens: "Women", refresh: "Refresh", close: "Close",
++      mens: "Men", womens: "Women", women: "Women", men: "Men", morning: "Morning", afternoon: "Afternoon", refresh: "Refresh", close: "Close",
+       sec_today: "Today", sec_week: "Week", sec_month: "Month",
+       sec_appointments: "Appointments", sec_checkout: "Checkout", sec_clients: "Clients",
+       sec_staff: "Staff", sec_services: "Services", sec_products: "Products",
+@@ -113,7 +114,40 @@ window.LUMIERE_DATA = {
+       chart_bars_h: "Horizontal bars", chart_heatmap: "Heatmap (weekday x week)",
+       period_all: "All records", period_custom: "Custom range", from_date: "From", to_date: "To",
+       custom_range_note: "Analytics are grouped by day (up to 45 days) or by week for longer ranges.",
+-      starter_packs: "Starter packs", all_packs: "All packs", other: "Other"
++      starter_packs: "Starter packs", all_packs: "All packs", other: "Other",
++      sec_data: "Data & backup",
++      data_note: "Export, import and manage your local records.",
++      data_backup: "Backup", data_backup_desc: "Download all records as a JSON file you can restore later.",
++      data_restore: "Restore", data_import_hint: "Pick a previously downloaded backup file and restore it.",
++      data_pick_file: "Pick a backup file first", data_bad_file: "That file is not a valid Lumiere backup",
++      data_restored: "Backup restored", data_reset: "Reset to demo data",
++      data_reset_desc: "Discard all current data and restore the original demo dataset.",
++      data_reset_confirm: "This will erase all current records. Continue?",
++      data_export_md: "Export records (Markdown)",
++      data_export_clients: "Clients CSV", data_export_staff: "Staff CSV", data_export_products: "Products CSV",
++      appt_date: "Date", appt_total: "Total",
++      appt_status_noshow: "No-show", appt_status_cancelled: "Cancelled",
++      appt_need_date_time: "Pick a date and a time", appt_outside_hours: "Outside opening hours",
++      appt_conflict: "That time is already booked for this stylist",
++      today_schedule: "Today's schedule", reorder_list: "Reorder list", restock: "Restock",
++      sec_care: "Client care",
++      care_note: "Re-engagement, no-show watchlist and your most valuable clients.",
++      care_due_title: "Due for a visit", care_last_visit: "Last visit", care_days_since: "Days since",
++      care_none_due: "Everyone visited recently",
++      care_noshow_title: "No-show watchlist", care_noshows: "No-shows", care_none_noshow: "No no-shows recorded",
++      care_vip_title: "VIP clients",
++      metric_services_rev: "Services revenue", metric_products_rev: "Products revenue",
++      metric_returning_rate: "Returning rate", metric_avg_frequency: "Avg visits / client",
++      receptionist_access: "Receptionist access",
++      receptionist_access_note: "Choose which sections receptionists can open.",
++      delete_confirm: "Delete this item?", deleted: "Deleted",
++      restocked: "Stock updated", data_reset_done: "Demo data restored",
++      nl_title: "Ask a question", nl_placeholder: 'e.g. "Revenue by service this month"',
++      nl_run: "Ask", nl_mic: "Voice", nl_listening: "Listening...",
++      nl_voice_unsupported: "Voice input not supported in this browser",
++      nl_error: "Could not start voice input",
++      nl_unknown: "I couldn't understand that. Try one of these:",
++      nl_today: "today", nl_from_to: "from {from} to {to}"
+     },
+     es: {
+       role_owner: "Dueño", role_admin: "Administrador", role_administrator: "Administrador", role_receptionist: "Recepcionista",
+@@ -131,7 +165,7 @@ window.LUMIERE_DATA = {
+       returning_after_1_2_months: "Regresa a los 1 / 2 meses",
+       new_visits: "Nuevos", return_visits: "Regresan", services: "Servicios",
+       payment_split: "Desglose de pagos", week_label: "Semana",
+-      mens: "Hombres", womens: "Mujeres", refresh: "Actualizar", close: "Cerrar",
++      mens: "Hombres", womens: "Mujeres", women: "Mujeres", men: "Hombres", morning: "Mañana", afternoon: "Tarde", refresh: "Actualizar", close: "Cerrar",
+       sec_today: "Hoy", sec_week: "Semana", sec_month: "Mes",
+       sec_appointments: "Turnos", sec_checkout: "Cobro", sec_clients: "Clientes",
+       sec_staff: "Equipo", sec_services: "Servicios", sec_products: "Productos",
+@@ -201,7 +235,40 @@ window.LUMIERE_DATA = {
+       chart_bars_h: "Barras horizontales", chart_heatmap: "Mapa de calor (día x semana)",
+       period_all: "Todos los registros", period_custom: "Rango personalizado", from_date: "Desde", to_date: "Hasta",
+       custom_range_note: "Las analíticas se agrupan por día (hasta 45 días) o por semana para rangos más largos.",
+-      starter_packs: "Paquetes de ejemplo", all_packs: "Todos los paquetes", other: "Otros"
++      starter_packs: "Paquetes de ejemplo", all_packs: "Todos los paquetes", other: "Otros",
++      sec_data: "Datos y respaldo",
++      data_note: "Exporta, importa y administra tus registros locales.",
++      data_backup: "Respaldo", data_backup_desc: "Descarga todos los registros en un archivo JSON para restaurarlos después.",
++      data_restore: "Restaurar", data_import_hint: "Elige un archivo de respaldo descargado antes y restáuralo.",
++      data_pick_file: "Elige un archivo de respaldo primero", data_bad_file: "Ese archivo no es un respaldo válido de Lumiere",
++      data_restored: "Respaldo restaurado", data_reset: "Restablecer datos de demo",
++      data_reset_desc: "Descarta los datos actuales y restaura el dataset de demo original.",
++      data_reset_confirm: "Esto borrará todos los registros actuales. ¿Continuar?",
++      data_export_md: "Exportar registros (Markdown)",
++      data_export_clients: "Clientes CSV", data_export_staff: "Equipo CSV", data_export_products: "Productos CSV",
++      appt_date: "Fecha", appt_total: "Total",
++      appt_status_noshow: "Inasistencia", appt_status_cancelled: "Cancelado",
++      appt_need_date_time: "Elige una fecha y una hora", appt_outside_hours: "Fuera del horario de atención",
++      appt_conflict: "Ese horario ya está reservado para este/a estilista",
++      today_schedule: "Agenda de hoy", reorder_list: "Lista de reposición", restock: "Reponer",
++      sec_care: "Atención al cliente",
++      care_note: "Re-engagement, lista de ausencias y tus clientes más valiosos.",
++      care_due_title: "Deben volver", care_last_visit: "Última visita", care_days_since: "Días desde",
++      care_none_due: "Todos visitaron recientemente",
++      care_noshow_title: "Lista de ausencias", care_noshows: "Ausencias", care_none_noshow: "Sin ausencias registradas",
++      care_vip_title: "Clientes VIP",
++      metric_services_rev: "Ingresos por servicios", metric_products_rev: "Ingresos por productos",
++      metric_returning_rate: "Tasa de regreso", metric_avg_frequency: "Visitas promedio por cliente",
++      receptionist_access: "Acceso de recepción",
++      receptionist_access_note: "Elige qué secciones pueden abrir los recepcionistas.",
++      delete_confirm: "¿Eliminar este elemento?", deleted: "Eliminado",
++      restocked: "Stock actualizado", data_reset_done: "Datos de demo restaurados",
++      nl_title: "Haz una pregunta", nl_placeholder: 'p. ej. "Ingresos por servicio este mes"',
++      nl_run: "Preguntar", nl_mic: "Voz", nl_listening: "Escuchando...",
++      nl_voice_unsupported: "La entrada de voz no es compatible con este navegador",
++      nl_error: "No se pudo iniciar la entrada de voz",
++      nl_unknown: "No entendí eso. Probá con uno de estos:",
++      nl_today: "hoy", nl_from_to: "del {from} al {to}"
+     }
+   },
+ 
+diff --git a/Lumiere-pos/dashboard/icon.svg b/Lumiere-pos/dashboard/icon.svg
+new file mode 100644
+index 0000000..c27a934
+--- /dev/null
++++ b/Lumiere-pos/dashboard/icon.svg
+@@ -0,0 +1,7 @@
++<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
++  <rect width="128" height="128" rx="28" fill="#0e0e11"/>
++  <rect x="6" y="6" width="116" height="116" rx="24" fill="none" stroke="#e8b64c" stroke-opacity="0.35" stroke-width="2"/>
++  <path d="M64 20 100 64 64 108 28 64Z" fill="none" stroke="#e8b64c" stroke-width="7" stroke-linejoin="round"/>
++  <path d="M46 64h36M64 46v36" stroke="#e8b64c" stroke-width="5" stroke-linecap="round"/>
++  <circle cx="64" cy="64" r="8" fill="#f2c14e"/>
++</svg>
+diff --git a/Lumiere-pos/dashboard/index.html b/Lumiere-pos/dashboard/index.html
+index 8721276..80b9e3f 100644
+--- a/Lumiere-pos/dashboard/index.html
++++ b/Lumiere-pos/dashboard/index.html
+@@ -4,6 +4,9 @@
+   <meta charset="UTF-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+   <title>Lumiere POS — Dashboard</title>
++  <meta name="theme-color" content="#0e0e11">
++  <link rel="manifest" href="manifest.json">
++  <link rel="icon" type="image/svg+xml" href="icon.svg">
+   <link rel="preconnect" href="https://fonts.googleapis.com">
+   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+@@ -49,6 +52,8 @@
+         <button class="nav-item owner-only" data-sec="commission" data-i18n="sec_commission"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>Commission</button>
+         <button class="nav-item owner-only" data-sec="reports" data-i18n="sec_reports"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/></svg>Reports</button>
+         <button class="nav-item owner-only" data-sec="rules" data-i18n="sec_rules"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>Rules</button>
++        <button class="nav-item owner-only" data-sec="data" data-i18n="sec_data"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5v8l9 5 9-5V8z"/><path d="M3 8l9 5 9-5"/><path d="M12 13v8"/></svg>Data</button>
++        <button class="nav-item owner-only" data-sec="care" data-i18n="sec_care"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21c-4.5-3.2-8-6.5-8-10a4.5 4.5 0 019-1.5A4.5 4.5 0 0122 11c0 3.5-3.5 6.8-8 10z"/></svg>Care</button>
+       </nav>
+     </aside>
+ 
+@@ -72,6 +77,7 @@
+   </div>
+ 
+   <script src="data.js"></script>
++  <script src="nl.js"></script>
+   <script src="app.js"></script>
+ </body>
+ </html>
+diff --git a/Lumiere-pos/dashboard/lumiere-pos-single.html b/Lumiere-pos/dashboard/lumiere-pos-single.html
+index 8ae6772..420847b 100644
+--- a/Lumiere-pos/dashboard/lumiere-pos-single.html
++++ b/Lumiere-pos/dashboard/lumiere-pos-single.html
+@@ -4,6 +4,9 @@
+   <meta charset="UTF-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+   <title>Lumiere POS — Dashboard</title>
++  <meta name="theme-color" content="#0e0e11">
++  <link rel="manifest" href="manifest.json">
++  <link rel="icon" type="image/svg+xml" href="icon.svg">
+   <style>
+ :root {
+   --bg: #0a0d13;
+@@ -470,6 +473,88 @@ input:focus, select:focus { outline: none; border-color: var(--gold); box-shadow
+ .btn.danger:hover { background: rgba(242, 96, 107, 0.12); box-shadow: 0 0 14px rgba(242, 96, 107, 0.2); }
+ .btn.sm { padding: 6px 9px; border-radius: 8px; line-height: 1; }
+ .btn.sm svg { vertical-align: -2px; }
++.btn.ok {
++  background: transparent;
++  color: var(--ok);
++  border: 1px solid rgba(61, 220, 151, 0.5);
++  box-shadow: none;
++}
++.btn.ok:hover { background: rgba(61, 220, 151, 0.12); box-shadow: 0 0 14px rgba(61, 220, 151, 0.2); }
++.btn.warn {
++  background: transparent;
++  color: var(--warn);
++  border: 1px solid rgba(242, 163, 60, 0.5);
++  box-shadow: none;
++}
++.btn.warn:hover { background: rgba(242, 163, 60, 0.12); box-shadow: 0 0 14px rgba(242, 163, 60, 0.2); }
++
++.appt-summary {
++  padding: 12px 16px;
++  color: var(--text-dim);
++  font-size: 13px;
++  border-top: 1px solid var(--border);
++}
++
++.reorder-panel { margin-bottom: 16px; }
++.reorder-row {
++  display: flex;
++  align-items: center;
++  gap: 12px;
++  padding: 9px 0;
++  border-bottom: 1px solid var(--border);
++}
++.reorder-row:last-child { border-bottom: none; }
++.reorder-name { flex: 1; font-weight: 600; }
++
++.toast-wrap {
++  position: fixed;
++  bottom: 20px;
++  right: 20px;
++  z-index: 2000;
++  display: flex;
++  flex-direction: column;
++  gap: 8px;
++  pointer-events: none;
++}
++.toast {
++  background: rgba(22, 22, 14, 0.95);
++  border: 1px solid var(--border-strong);
++  border-left: 3px solid var(--gold-soft);
++  color: var(--text);
++  padding: 11px 16px;
++  border-radius: var(--radius-sm);
++  font-size: 13.5px;
++  font-weight: 600;
++  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
++  opacity: 0;
++  transform: translateY(8px);
++  transition: opacity 0.2s, transform 0.2s;
++  max-width: 320px;
++}
++.toast.show { opacity: 1; transform: translateY(0); }
++
++.nl-suggestions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
++.chip {
++  background: var(--surface2);
++  border: 1px solid var(--border);
++  color: var(--text-dim);
++  border-radius: 999px;
++  padding: 6px 12px;
++  font-size: 12.5px;
++  cursor: pointer;
++  transition: border-color 0.15s, color 0.15s;
++}
++.chip:hover { border-color: var(--gold-soft); color: var(--gold-soft); }
++.nl-confirm {
++  margin-top: 12px;
++  padding: 8px 12px;
++  border-radius: var(--radius-sm);
++  background: rgba(55, 200, 168, 0.12);
++  border: 1px solid rgba(55, 200, 168, 0.35);
++  color: var(--teal-soft);
++  font-size: 13px;
++  font-weight: 600;
++}
+ 
+ .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+ .form-field label {
+@@ -723,6 +808,8 @@ input:focus, select:focus { outline: none; border-color: var(--gold); box-shadow
+         <button class="nav-item owner-only" data-sec="commission" data-i18n="sec_commission"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1v22M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>Commission</button>
+         <button class="nav-item owner-only" data-sec="reports" data-i18n="sec_reports"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/></svg>Reports</button>
+         <button class="nav-item owner-only" data-sec="rules" data-i18n="sec_rules"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>Rules</button>
++        <button class="nav-item owner-only" data-sec="data" data-i18n="sec_data"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5v8l9 5 9-5V8z"/><path d="M3 8l9 5 9-5"/><path d="M12 13v8"/></svg>Data</button>
++        <button class="nav-item owner-only" data-sec="care" data-i18n="sec_care"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21c-4.5-3.2-8-6.5-8-10a4.5 4.5 0 019-1.5A4.5 4.5 0 0122 11c0 3.5-3.5 6.8-8 10z"/></svg>Care</button>
+       </nav>
+     </aside>
+ 
+@@ -762,6 +849,7 @@ window.LUMIERE_DATA = {
+     closedDays: [0],
+     nightCloseEnabled: false,
+     lowStockDefault: 5,
++    receptionistSections: ["today", "appointments", "checkout", "clients", "staff", "services", "products", "sales"],
+     predefinedRules: [
+       { key: "no_show_fee",    label_en: "Charge 50% on no-shows",            label_es: "Cobrar 50% por ausencia",       enabled: true },
+       { key: "retouch_free",   label_en: "Free retouch within 7 days",        label_es: "Retoque gratis dentro de 7 días", enabled: false },
+@@ -791,7 +879,7 @@ window.LUMIERE_DATA = {
+       returning_after_1_2_months: "Returning after 1 / 2 months",
+       new_visits: "New", return_visits: "Returning", services: "Services",
+       payment_split: "Payment split", week_label: "Week",
+-      mens: "Men", womens: "Women", refresh: "Refresh", close: "Close",
++      mens: "Men", womens: "Women", women: "Women", men: "Men", morning: "Morning", afternoon: "Afternoon", refresh: "Refresh", close: "Close",
+       sec_today: "Today", sec_week: "Week", sec_month: "Month",
+       sec_appointments: "Appointments", sec_checkout: "Checkout", sec_clients: "Clients",
+       sec_staff: "Staff", sec_services: "Services", sec_products: "Products",
+@@ -861,7 +949,40 @@ window.LUMIERE_DATA = {
+       chart_bars_h: "Horizontal bars", chart_heatmap: "Heatmap (weekday x week)",
+       period_all: "All records", period_custom: "Custom range", from_date: "From", to_date: "To",
+       custom_range_note: "Analytics are grouped by day (up to 45 days) or by week for longer ranges.",
+-      starter_packs: "Starter packs", all_packs: "All packs", other: "Other"
++      starter_packs: "Starter packs", all_packs: "All packs", other: "Other",
++      sec_data: "Data & backup",
++      data_note: "Export, import and manage your local records.",
++      data_backup: "Backup", data_backup_desc: "Download all records as a JSON file you can restore later.",
++      data_restore: "Restore", data_import_hint: "Pick a previously downloaded backup file and restore it.",
++      data_pick_file: "Pick a backup file first", data_bad_file: "That file is not a valid Lumiere backup",
++      data_restored: "Backup restored", data_reset: "Reset to demo data",
++      data_reset_desc: "Discard all current data and restore the original demo dataset.",
++      data_reset_confirm: "This will erase all current records. Continue?",
++      data_export_md: "Export records (Markdown)",
++      data_export_clients: "Clients CSV", data_export_staff: "Staff CSV", data_export_products: "Products CSV",
++      appt_date: "Date", appt_total: "Total",
++      appt_status_noshow: "No-show", appt_status_cancelled: "Cancelled",
++      appt_need_date_time: "Pick a date and a time", appt_outside_hours: "Outside opening hours",
++      appt_conflict: "That time is already booked for this stylist",
++      today_schedule: "Today's schedule", reorder_list: "Reorder list", restock: "Restock",
++      sec_care: "Client care",
++      care_note: "Re-engagement, no-show watchlist and your most valuable clients.",
++      care_due_title: "Due for a visit", care_last_visit: "Last visit", care_days_since: "Days since",
++      care_none_due: "Everyone visited recently",
++      care_noshow_title: "No-show watchlist", care_noshows: "No-shows", care_none_noshow: "No no-shows recorded",
++      care_vip_title: "VIP clients",
++      metric_services_rev: "Services revenue", metric_products_rev: "Products revenue",
++      metric_returning_rate: "Returning rate", metric_avg_frequency: "Avg visits / client",
++      receptionist_access: "Receptionist access",
++      receptionist_access_note: "Choose which sections receptionists can open.",
++      delete_confirm: "Delete this item?", deleted: "Deleted",
++      restocked: "Stock updated", data_reset_done: "Demo data restored",
++      nl_title: "Ask a question", nl_placeholder: 'e.g. "Revenue by service this month"',
++      nl_run: "Ask", nl_mic: "Voice", nl_listening: "Listening...",
++      nl_voice_unsupported: "Voice input not supported in this browser",
++      nl_error: "Could not start voice input",
++      nl_unknown: "I couldn't understand that. Try one of these:",
++      nl_today: "today", nl_from_to: "from {from} to {to}"
+     },
+     es: {
+       role_owner: "Dueño", role_admin: "Administrador", role_administrator: "Administrador", role_receptionist: "Recepcionista",
+@@ -879,7 +1000,7 @@ window.LUMIERE_DATA = {
+       returning_after_1_2_months: "Regresa a los 1 / 2 meses",
+       new_visits: "Nuevos", return_visits: "Regresan", services: "Servicios",
+       payment_split: "Desglose de pagos", week_label: "Semana",
+-      mens: "Hombres", womens: "Mujeres", refresh: "Actualizar", close: "Cerrar",
++      mens: "Hombres", womens: "Mujeres", women: "Mujeres", men: "Hombres", morning: "Mañana", afternoon: "Tarde", refresh: "Actualizar", close: "Cerrar",
+       sec_today: "Hoy", sec_week: "Semana", sec_month: "Mes",
+       sec_appointments: "Turnos", sec_checkout: "Cobro", sec_clients: "Clientes",
+       sec_staff: "Equipo", sec_services: "Servicios", sec_products: "Productos",
+@@ -949,7 +1070,40 @@ window.LUMIERE_DATA = {
+       chart_bars_h: "Barras horizontales", chart_heatmap: "Mapa de calor (día x semana)",
+       period_all: "Todos los registros", period_custom: "Rango personalizado", from_date: "Desde", to_date: "Hasta",
+       custom_range_note: "Las analíticas se agrupan por día (hasta 45 días) o por semana para rangos más largos.",
+-      starter_packs: "Paquetes de ejemplo", all_packs: "Todos los paquetes", other: "Otros"
++      starter_packs: "Paquetes de ejemplo", all_packs: "Todos los paquetes", other: "Otros",
++      sec_data: "Datos y respaldo",
++      data_note: "Exporta, importa y administra tus registros locales.",
++      data_backup: "Respaldo", data_backup_desc: "Descarga todos los registros en un archivo JSON para restaurarlos después.",
++      data_restore: "Restaurar", data_import_hint: "Elige un archivo de respaldo descargado antes y restáuralo.",
++      data_pick_file: "Elige un archivo de respaldo primero", data_bad_file: "Ese archivo no es un respaldo válido de Lumiere",
++      data_restored: "Respaldo restaurado", data_reset: "Restablecer datos de demo",
++      data_reset_desc: "Descarta los datos actuales y restaura el dataset de demo original.",
++      data_reset_confirm: "Esto borrará todos los registros actuales. ¿Continuar?",
++      data_export_md: "Exportar registros (Markdown)",
++      data_export_clients: "Clientes CSV", data_export_staff: "Equipo CSV", data_export_products: "Productos CSV",
++      appt_date: "Fecha", appt_total: "Total",
++      appt_status_noshow: "Inasistencia", appt_status_cancelled: "Cancelado",
++      appt_need_date_time: "Elige una fecha y una hora", appt_outside_hours: "Fuera del horario de atención",
++      appt_conflict: "Ese horario ya está reservado para este/a estilista",
++      today_schedule: "Agenda de hoy", reorder_list: "Lista de reposición", restock: "Reponer",
++      sec_care: "Atención al cliente",
++      care_note: "Re-engagement, lista de ausencias y tus clientes más valiosos.",
++      care_due_title: "Deben volver", care_last_visit: "Última visita", care_days_since: "Días desde",
++      care_none_due: "Todos visitaron recientemente",
++      care_noshow_title: "Lista de ausencias", care_noshows: "Ausencias", care_none_noshow: "Sin ausencias registradas",
++      care_vip_title: "Clientes VIP",
++      metric_services_rev: "Ingresos por servicios", metric_products_rev: "Ingresos por productos",
++      metric_returning_rate: "Tasa de regreso", metric_avg_frequency: "Visitas promedio por cliente",
++      receptionist_access: "Acceso de recepción",
++      receptionist_access_note: "Elige qué secciones pueden abrir los recepcionistas.",
++      delete_confirm: "¿Eliminar este elemento?", deleted: "Eliminado",
++      restocked: "Stock actualizado", data_reset_done: "Datos de demo restaurados",
++      nl_title: "Haz una pregunta", nl_placeholder: 'p. ej. "Ingresos por servicio este mes"',
++      nl_run: "Preguntar", nl_mic: "Voz", nl_listening: "Escuchando...",
++      nl_voice_unsupported: "La entrada de voz no es compatible con este navegador",
++      nl_error: "No se pudo iniciar la entrada de voz",
++      nl_unknown: "No entendí eso. Probá con uno de estos:",
++      nl_today: "hoy", nl_from_to: "del {from} al {to}"
+     }
+   },
+ 
+@@ -1145,6 +1299,294 @@ window.LUMIERE_DATA = {
+     { id: "app-020", date: "2026-08-15", time: "18:00", client: "0008", stylist: "stylist-002-carlos", service: "brow-shaping", status: "booked" }
+   ]
+ };
++</script>
++  <script>
++(function (global) {
++  "use strict";
++
++  /* Deterministic, bilingual (EN/ES) natural-language analytics parser.
++     Maps a plain-language question onto the dashboard's analytics query
++     object q = { metric, dimension, compare, chart, period, staff, gender,
++     payment, limit, from, to }. No external services; fully offline. */
++
++  function norm(s) { return String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim(); }
++  function pad2(n) { return (n < 10 ? "0" : "") + n; }
++  function fmtDate(dt) { return dt.getFullYear() + "-" + pad2(dt.getMonth() + 1) + "-" + pad2(dt.getDate()); }
++  function addDaysStr(d, n) { var dt = new Date(d + "T00:00:00"); dt.setDate(dt.getDate() + n); return fmtDate(dt); }
++  function addMonthsStr(d, n) { var dt = new Date(d + "T00:00:00"); var day = dt.getDate(); dt.setMonth(dt.getMonth() + n); if (dt.getDate() < day) dt.setDate(0); return fmtDate(dt); }
++  function todayStr() { return fmtDate(new Date()); }
++  function escRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
++  function matchWord(text, phrase) {
++    return new RegExp("\\b" + escRe(phrase) + "\\b").test(text);
++  }
++  function matchAny(text, words) { for (var i = 0; i < words.length; i++) if (matchWord(text, words[i])) return true; return false; }
++
++  var METRIC_SYN = {
++    en: {
++      services_rev: ["revenue from services", "services revenue", "service revenue", "revenue of services"],
++      products_rev: ["revenue from products", "products revenue", "product revenue", "revenue of products"],
++      returning_rate: ["returning rate", "rebooking rate", "retention rate", "return rate"],
++      avg_ticket: ["average ticket", "avg ticket", "average spend", "average sale", "ticket size", "avg. ticket"],
++      returning: ["returning clients", "returning visits", "repeat clients", "repeating clients"],
++      new_clients: ["new clients", "new customers"],
++      avg_frequency: ["average frequency", "avg visits per client", "visits per client", "frequency of visits"],
++      product_qty: ["products sold", "product quantity", "units sold"],
++      commission: ["commission", "commissions"],
++      revenue: ["revenue", "sales", "income", "takings", "turnover", "earnings"],
++      visits: ["visits", "tickets", "attendances", "appointments done"]
++    },
++    es: {
++      services_rev: ["ingresos por servicios", "ingresos de servicios", "facturacion por servicios"],
++      products_rev: ["ingresos por productos", "ingresos de productos", "ventas de productos"],
++      returning_rate: ["tasa de regreso", "tasa de rebooking", "tasa de retencion", "porcentaje de regreso"],
++      avg_ticket: ["ticket promedio", "promedio de ticket", "gasto promedio", "venta promedio", "promedio por ticket"],
++      returning: ["clientes que regresan", "visitas recurrentes", "recurrentes"],
++      new_clients: ["clientes nuevos", "nuevos clientes"],
++      avg_frequency: ["frecuencia promedio", "visitas por cliente", "frecuencia de visitas"],
++      product_qty: ["productos vendidos", "cantidad de productos", "unidades vendidas"],
++      commission: ["comisiones"],
++      revenue: ["ingresos", "ventas", "facturacion", "recaudacion"],
++      visits: ["visitas", "atenciones", "turnos realizados"]
++    }
++  };
++
++  var METRIC_PRIORITY = ["services_rev", "products_rev", "returning_rate", "avg_ticket", "returning", "new_clients", "avg_frequency", "product_qty", "commission", "revenue", "visits"];
++
++  var DIM_SYN = {
++    en: {
++      month: ["by month", "monthly"],
++      week: ["by week", "weekly"],
++      weekday: ["by weekday", "by day of the week", "day of week"],
++      staff: ["by staff", "by stylist", "by employee", "per staff", "per stylist", "by team"],
++      service: ["by service", "by treatment", "per service", "services", "service"],
++      product: ["by product", "per product", "products", "product"],
++      payment: ["by payment method", "by payment", "per payment"],
++      gender: ["by gender", "per gender"],
++      client: ["by client", "per client", "top clients", "top client"],
++      day: ["by day", "daily"]
++    },
++    es: {
++      month: ["por mes", "mensual"],
++      week: ["por semana", "semanal"],
++      weekday: ["por dia de la semana", "dia de la semana"],
++      staff: ["por equipo", "por estilista", "por empleado"],
++      service: ["por servicio", "por tratamiento", "servicios", "servicio"],
++      product: ["por producto", "productos", "producto"],
++      payment: ["por metodo de pago", "por pago"],
++      gender: ["por genero"],
++      client: ["por cliente", "mejores clientes", "top clientes"],
++      day: ["por dia", "diario"]
++    }
++  };
++
++  var CHART_SYN = {
++    en: { line: ["line chart", "trend", "over time"], donut: ["donut", "pie chart", "pie"], "bars-h": ["bar chart", "bars"], heatmap: ["heatmap"] },
++    es: { line: ["linea", "tendencia", "evolucion"], donut: ["donut", "torta", "circular", "pastel"], "bars-h": ["barras", "grafico de barras"], heatmap: ["mapa de calor"] }
++  };
++
++  var GENDER_WORDS = {
++    en: { women: ["women", "female", "ladies"], men: ["men", "male", "gentlemen"] },
++    es: { women: ["mujeres", "femenino", "damas"], men: ["hombres", "masculino", "caballeros"] }
++  };
++
++  var PAYMENT_WORDS = {
++    en: { cash: ["cash", "in cash"], card: ["card", "credit card", "debit card"], mobile: ["mobile payment", "mobile"], gift_card: ["gift card"], voucher: ["voucher"] },
++    es: { cash: ["efectivo", "en efectivo"], card: ["tarjeta", "tarjeta de credito", "tarjeta de debito"], mobile: ["mercado pago", "pago movil", "movil"], gift_card: ["tarjeta regalo", "gift card"], voucher: ["voucher"] }
++  };
++
++  var WEEKEND_WORDS = { en: ["weekend", "weekends", "friday", "fridays", "saturday", "saturdays"], es: ["fin de semana", "finde", "viernes", "sabado"] };
++
++  function entityMatches(text, list, nameKeys) {
++    var found = [];
++    list.forEach(function (it) {
++      var hit = false;
++      nameKeys.forEach(function (k) {
++        var nm = String(it[k] || "").toLowerCase();
++        if (nm && matchWord(text, nm)) hit = true;
++        var first = nm.split(" ")[0];
++        if (first && first !== nm && matchWord(text, first)) hit = true;
++      });
++      if (hit) found.push(it);
++    });
++    return found;
++  }
++
++  function resolveMetric(text, lang) {
++    var dict = METRIC_SYN[lang] || METRIC_SYN.en;
++    for (var p = 0; p < METRIC_PRIORITY.length; p++) {
++      var key = METRIC_PRIORITY[p];
++      var words = dict[key].slice().sort(function (a, b) { return b.length - a.length; });
++      for (var i = 0; i < words.length; i++) if (matchWord(text, words[i])) return { key: key, matched: true };
++    }
++    return { key: "revenue", matched: false };
++  }
++
++  function resolveDimension(text, lang) {
++    var dict = DIM_SYN[lang] || DIM_SYN.en;
++    var keys = Object.keys(dict);
++    for (var i = 0; i < keys.length; i++) {
++      var words = dict[keys[i]].slice().sort(function (a, b) { return b.length - a.length; });
++      for (var j = 0; j < words.length; j++) if (matchWord(text, words[j])) return { key: keys[i], matched: true };
++    }
++    if (matchAny(text, WEEKEND_WORDS[lang] || WEEKEND_WORDS.en)) return { key: "weekday", matched: true };
++    return { key: "", matched: false };
++  }
++
++  function resolveChart(text, lang) {
++    var dict = CHART_SYN[lang] || CHART_SYN.en;
++    var keys = Object.keys(dict);
++    for (var i = 0; i < keys.length; i++) {
++      var words = dict[keys[i]].slice().sort(function (a, b) { return b.length - a.length; });
++      for (var j = 0; j < words.length; j++) if (matchWord(text, words[j])) return { key: keys[i], matched: true };
++    }
++    return { key: "", matched: false };
++  }
++
++  function resolvePeriod(text, refToday) {
++    var ref = refToday || todayStr();
++    var m = text.match(/(?:last|ultimos?|últimos?)\s*(\d+)\s*(?:months?|mes(?:es)?)/);
++    if (m) return { period: "custom", from: addMonthsStr(ref, -parseInt(m[1], 10)), to: ref, matched: true };
++    m = text.match(/(?:last|ultimos?|últimos?)\s*(\d+)\s*(?:days?|dias?|días?)/);
++    if (m) return { period: "custom", from: addDaysStr(ref, -parseInt(m[1], 10)), to: ref, matched: true };
++    if (matchAny(text, ["last week", "semana pasada", "la semana pasada"])) return { period: "custom", from: addDaysStr(ref, -7), to: addDaysStr(ref, -1), matched: true };
++    if (matchAny(text, ["last month", "mes pasado", "el mes pasado"])) { var ms = ref.slice(0, 8) + "01"; return { period: "custom", from: addMonthsStr(ms, -1), to: addDaysStr(ms, -1), matched: true }; }
++    if (matchAny(text, ["this week", "esta semana"])) return { period: "weekly", from: "", to: "", matched: true };
++    if (matchAny(text, ["this month", "este mes"])) return { period: "monthly", from: "", to: "", matched: true };
++    if (matchAny(text, ["this year", "este ano", "este año"])) return { period: "custom", from: ref.slice(0, 4) + "-01-01", to: ref, matched: true };
++    if (matchAny(text, ["today", "hoy"])) return { period: "custom", from: ref, to: ref, matched: true };
++    return { period: "monthly", from: "", to: "", matched: false };
++  }
++
++  function resolveFilters(text, lang, staffMatched) {
++    var out = { staff: "", gender: "", payment: "", matched: false };
++    if (staffMatched.length === 1) { out.staff = staffMatched[0].id; out.matched = true; }
++    var gw = GENDER_WORDS[lang] || GENDER_WORDS.en;
++    if (matchAny(text, gw.women)) { out.gender = "women"; out.matched = true; }
++    else if (matchAny(text, gw.men)) { out.gender = "men"; out.matched = true; }
++    var pw = PAYMENT_WORDS[lang] || PAYMENT_WORDS.en;
++    Object.keys(pw).forEach(function (k) {
++      if (matchAny(text, pw[k])) { out.payment = k; out.matched = true; }
++    });
++    return out;
++  }
++
++  function resolveCompare(text, lang, staffMatched) {
++    if (matchAny(text, ["new vs returning", "returning vs new", "new and returning", "nuevos vs recurrentes", "recurrentes vs nuevos"])) return { key: "new_ret", matched: true };
++    if (matchAny(text, ["by group", "by category", "por grupo", "por categoria"])) return { key: "group", matched: true };
++    if (staffMatched.length >= 2 && matchAny(text, [" vs ", " versus ", "compared to", "compared with", "en comparacion", "comparado con"])) return { key: "staff", matched: true };
++    if (staffMatched.length >= 2) return { key: "staff", matched: true };
++    return { key: "", matched: false };
++  }
++
++  function resolveLimit(text) {
++    var m = text.match(/(?:top|mejores|principales)\s*(\d+)/);
++    if (m) return { limit: Math.max(1, Math.min(50, parseInt(m[1], 10))), matched: true };
++    return { limit: 10, matched: false };
++  }
++
++  function i18n(D, lang, key) {
++    return (D.i18n[lang] && D.i18n[lang][key]) || (D.i18n.en && D.i18n.en[key]) || key;
++  }
++
++  function buildSummary(D, lang, q, meta) {
++    var metricLabel = i18n(D, lang, "metric_" + q.metric);
++    var dimLabel = i18n(D, lang, "dim_" + q.dimension);
++    var periodLabel;
++    if (q.period === "custom") {
++      var fromTo = D.i18n[lang] && D.i18n[lang].nl_from_to;
++      periodLabel = fromTo ? fromTo.replace("{from}", q.from).replace("{to}", q.to) : (q.from + " → " + q.to);
++    } else {
++      periodLabel = i18n(D, lang, q.period);
++    }
++    var parts = [metricLabel, dimLabel, periodLabel];
++    if (q.compare === "staff" && meta.staffNames && meta.staffNames.length >= 2) parts.push(meta.staffNames.join(" & "));
++    if (q.staff && meta.staffNames && meta.staffNames.length) parts.push(meta.staffNames[0]);
++    if (q.gender) parts.push(i18n(D, lang, q.gender === "women" ? "womens" : "mens"));
++    if (q.payment) parts.push(i18n(D, lang, q.payment));
++    if (q.compare === "new_ret") parts.push(i18n(D, lang, "compare_new_ret"));
++    return parts.join(" · ");
++  }
++
++  function parse(text, D, lang) {
++    lang = lang === "es" ? "es" : "en";
++    var t = norm(text);
++    if (!t) return { type: "unknown" };
++    var refToday = (D.meta && D.meta.today) || todayStr();
++
++    var staffMatched = entityMatches(t, D.staff || [], ["name"]);
++    var svcMatched = entityMatches(t, Object.keys(D.services || {}).map(function (k) { return { id: k, name: D.services[k].name_en, nameEs: D.services[k].name_es }; }), lang === "es" ? ["nameEs"] : ["name"]);
++    var prodMatched = entityMatches(t, Object.keys(D.products || {}).map(function (k) { return { id: k, name: D.products[k].name_en, nameEs: D.products[k].name_es }; }), lang === "es" ? ["nameEs"] : ["name"]);
++
++    var metric = resolveMetric(t, lang);
++    var dimension = resolveDimension(t, lang);
++    var dimKey = dimension.key;
++    if (!dimKey) {
++      if (svcMatched.length) dimKey = "service";
++      else if (prodMatched.length) dimKey = "product";
++      else if (staffMatched.length === 1) dimKey = "day";
++      else dimKey = "day";
++    }
++    if (dimKey === "day" && (svcMatched.length || prodMatched.length)) dimKey = svcMatched.length ? "service" : "product";
++
++    var period = resolvePeriod(t, refToday);
++    var chart = resolveChart(t, lang);
++    var filters = resolveFilters(t, lang, staffMatched);
++    var compare = resolveCompare(t, lang, staffMatched);
++    var limit = resolveLimit(t);
++
++    var signals = metric.matched || dimension.matched || period.matched || chart.matched || compare.matched ||
++      staffMatched.length > 0 || svcMatched.length > 0 || prodMatched.length > 0 || filters.matched || limit.matched;
++    if (!signals) return { type: "unknown" };
++
++    if (compare.key === "staff") filters.staff = "";
++
++    var q = {
++      metric: metric.key,
++      dimension: dimKey,
++      compare: compare.key,
++      chart: chart.key || "auto",
++      period: period.period,
++      staff: filters.staff,
++      gender: filters.gender,
++      payment: filters.payment,
++      limit: limit.limit,
++      from: period.from,
++      to: period.to
++    };
++
++    var meta = { staffNames: staffMatched.map(function (s) { return s.name; }) };
++    return { type: "query", q: q, summary: buildSummary(D, lang, q, meta) };
++  }
++
++  function speechSupported() {
++    try {
++      return !!(global.SpeechRecognition || global.webkitSpeechRecognition);
++    } catch (e) { return false; }
++  }
++
++  function recognize(lang, onResult, onEnd, onError) {
++    var SR = global.SpeechRecognition || global.webkitSpeechRecognition;
++    if (!SR) return null;
++    var rec = new SR();
++    rec.lang = lang === "es" ? "es-AR" : "en-US";
++    rec.interimResults = false;
++    rec.maxAlternatives = 1;
++    rec.onresult = function (ev) {
++      var txt = "";
++      for (var i = 0; i < ev.results.length; i++) {
++        var alt = ev.results[i];
++        if (alt && alt[0] && alt[0].transcript) txt += alt[0].transcript;
++      }
++      onResult(txt.trim());
++    };
++    if (onEnd) rec.onend = onEnd;
++    if (onError) rec.onerror = onError;
++    rec.start();
++    return rec;
++  }
++
++  global.NaturalQuery = { parse: parse, speechSupported: speechSupported, recognize: recognize };
++})(typeof window !== "undefined" ? window : (typeof globalThis !== "undefined" ? globalThis : global));
+ </script>
+   <script>
+ (function () {
+@@ -1161,8 +1603,10 @@ window.LUMIERE_DATA = {
+   var analyticsQueries = null;
+   var analyticsDraft = null;
+   var lastQueryResult = null;
++  var nlText = "";
+   var editTarget = null;
+   var searchQ = "";
++  var apptViewDate = "";
+   var checkout = { client: "", stylist: "", assistant: "", lines: [], payments: {} };
+ 
+   try { lang = localStorage.getItem("lumiere_lang") || "en"; } catch (e) {}
+@@ -1171,7 +1615,7 @@ window.LUMIERE_DATA = {
+   var D = loadData();
+   var state = { today: D.meta.today, weekStart: D.meta.weekStart, weekEnd: D.meta.weekEnd };
+ 
+-  var OWNER_SECTIONS = ["week", "month", "commission", "reports", "analytics", "rules"];
++  var OWNER_SECTIONS = ["week", "month", "commission", "reports", "analytics", "rules", "data", "care"];
+   var PUBLIC_SECTIONS = ["today", "appointments", "checkout", "clients", "staff", "services", "products", "sales"];
+ 
+   function isObj(x) { return x && typeof x === "object" && !Array.isArray(x); }
+@@ -1199,7 +1643,12 @@ window.LUMIERE_DATA = {
+   }
+ 
+   function canSee(s) {
+-    if (role === "receptionist") return PUBLIC_SECTIONS.indexOf(s) > -1;
++    if (role === "receptionist") {
++      if (s === "today") return true;
++      var allowed = D.settings.receptionistSections;
++      if (allowed) return allowed.indexOf(s) > -1;
++      return PUBLIC_SECTIONS.indexOf(s) > -1;
++    }
+     return true;
+   }
+   function canEdit() { return role === "owner" || role === "admin"; }
+@@ -1280,7 +1729,7 @@ window.LUMIERE_DATA = {
+ 
+   function statusBadge(status) {
+     var map = {
+-      booked: "gold", done: "ok", "no-show": "danger", paid: "ok",
++      booked: "gold", done: "ok", "no-show": "danger", cancelled: "dim", paid: "ok",
+       pending: "warn", active: "ok", archived: "dim", briefed: "warn",
+       approved: "ok", morning: "gold", afternoon: "warn"
+     };
+@@ -1564,6 +2013,30 @@ window.LUMIERE_DATA = {
+     return isNaN(v) ? (fallback || 0) : v;
+   }
+ 
++  function toast(msg) {
++    try {
++      if (typeof document === "undefined" || !document.body) return;
++      var wrap = document.getElementById("toastWrap");
++      if (!wrap) {
++        wrap = document.createElement("div");
++        wrap.id = "toastWrap";
++        wrap.className = "toast-wrap";
++        document.body.appendChild(wrap);
++      }
++      var el = document.createElement("div");
++      el.className = "toast";
++      el.textContent = msg;
++      wrap.appendChild(el);
++      if (el.classList) { el.classList.add("show"); }
++      setTimeout(function () { if (el.classList) el.classList.remove("show"); if (el.remove) el.remove(); }, 2600);
++    } catch (e) {}
++  }
++
++  function confirmDelete(label) {
++    try { return confirm(t("delete_confirm") + "\n" + (label || "")); }
++    catch (e) { return true; }
++  }
++
+   function renderClientForm() {
+     var c = editTarget.id ? clientById(editTarget.id) : null;
+     var mode = editTarget.mode;
+@@ -1648,6 +2121,20 @@ window.LUMIERE_DATA = {
+       html += '<div class="card"><h3>' + t("pending") + '</h3></div>';
+     }
+ 
++    var todayApps = D.appointments.filter(function (a) { return a.date === state.today && a.status === "booked"; })
++      .sort(function (a, b) { return a.time < b.time ? -1 : 1; });
++    if (todayApps.length) {
++      var apptRows = [[t("time"), t("client"), t("services"), t("staff")]];
++      todayApps.forEach(function (a) {
++        apptRows.push([a.time,
++          esc((clientById(a.client) || {}).name || a.client),
++          svcName(a.service),
++          esc((staffById(a.stylist) || {}).name || a.stylist)]);
++      });
++      html += sectionTitle("🕐 " + t("today_schedule"));
++      html += table(apptRows, { numCols: [0] });
++    }
++
+     html += sectionTitle("🏆 " + t("top_clients"));
+     html += table(renderTopClients(D.tickets.filter(function (t) { return t.date === state.today; })), { numCols: [1] });
+     return html;
+@@ -1799,31 +2286,79 @@ window.LUMIERE_DATA = {
+     return rows;
+   }
+ 
++  function appointmentById(id) { return D.appointments.find(function (a) { return a.id === id; }); }
++
++  function renderAppointmentForm() {
++    var a = editTarget.id ? appointmentById(editTarget.id) : null;
++    var title = editTarget.mode === "edit"
++      ? t("edit") + " — " + esc((a && clientById(a.client) ? clientById(a.client).name : "") + " · " + (a ? a.time : ""))
++      : t("new_appointment");
++    var body =
++      field(t("appt_date"), '<input id="apDate" type="date" value="' + esc(a ? a.date : (apptViewDate || state.today)) + '">') +
++      field(t("time"), '<input id="apTime" type="time" value="' + esc(a ? a.time : "") + '">') +
++      field(t("client"), '<select id="apClient">' + D.clients.map(function (c) {
++        return '<option value="' + c.id + '"' + (a && a.client === c.id ? " selected" : "") + '>' + esc(c.name) + '</option>';
++      }).join("") + '</select>') +
++      field(t("services"), '<select id="apSvc">' + Object.keys(D.services).map(function (k) {
++        return '<option value="' + k + '"' + (a && a.service === k ? " selected" : "") + '>' + esc(svcName(k)) + '</option>';
++      }).join("") + '</select>') +
++      field(t("staff"), '<select id="apStylist">' + D.staff.filter(function (s) { return s.role === "stylist" && s.status !== "archived"; }).map(function (s) {
++        return '<option value="' + s.id + '"' + (a && a.stylist === s.id ? " selected" : "") + '>' + esc(s.name) + '</option>';
++      }).join("") + '</select>') +
++      (editTarget.mode === "edit" ? field(t("status"), '<select id="apStatus"><option value="booked"' + (a && a.status === "booked" ? " selected" : "") + '>' + t("booked") + '</option><option value="done"' + (a && a.status === "done" ? " selected" : "") + '>' + t("done") + '</option><option value="no-show"' + (a && a.status === "no-show" ? " selected" : "") + '>' + t("appt_status_noshow") + '</option><option value="cancelled"' + (a && a.status === "cancelled" ? " selected" : "") + '>' + t("appt_status_cancelled") + '</option></select>') : "");
++    var actions =
++      '<button class="btn" onclick="Lumiere.saveAppointment()">' + t("save") + '</button>' +
++      '<button class="btn ghost" onclick="Lumiere.cancelForm()">' + t("cancel") + '</button>';
++    return formCard(title, '<div class="form-row">' + body + '</div>' +
++      '<span id="apMsg" class="muted" style="margin-top:8px;display:block"></span>', actions);
++  }
++
+   function renderAppointments() {
++    var date = apptViewDate || state.today;
+     var html = '<div class="toolbar">' +
+       '<h2>🕐 ' + t("sec_appointments") + '</h2>' +
+       '<span class="spacer"></span>' +
+-      '<input type="date" id="apptDate" value="' + state.today + '" style="width:160px">' +
+-      '<button class="btn" onclick="Lumiere.newAppointment()">' + icon("plus", 14) + ' ' + t("new_appointment") + '</button>' +
++      '<input type="date" id="apptDate" value="' + date + '" style="width:160px">' +
++      '<button class="btn" onclick="Lumiere.startAppointmentForm()">' + icon("plus", 14) + ' ' + t("new_appointment") + '</button>' +
+       '</div>';
+ 
+-    var apps = D.appointments.filter(function (a) { return a.date >= state.today; })
+-      .sort(function (a, b) { return (a.date + a.time) < (b.date + b.time) ? -1 : 1; });
++    if (editTarget && editTarget.kind === "appointment") html += renderAppointmentForm();
++
++    var apps = D.appointments.filter(function (a) { return a.date === date; })
++      .sort(function (a, b) { return a.time < b.time ? -1 : 1; });
+ 
+     if (!apps.length) return html + '<div class="card"><h3>' + t("pending") + '</h3></div>';
+ 
+     html += '<div class="card"><div class="appointment-row" style="color:var(--text-dim);font-weight:600;text-transform:uppercase;font-size:12px">' +
+-      '<div>' + t("time") + '</div><div>' + t("client") + '</div><div>' + t("services") + '</div><div>' + t("staff") + '</div><div>' + t("status") + '</div></div>';
++      '<div>' + t("time") + '</div><div>' + t("client") + '</div><div>' + t("services") + '</div><div>' + t("staff") + '</div><div>' + t("status") + '</div><div></div></div>';
+ 
++    var counts = { booked: 0, done: 0, "no-show": 0, cancelled: 0 };
+     apps.forEach(function (a) {
++      if (counts[a.status] !== undefined) counts[a.status]++;
+       var c = clientById(a.client), s = staffById(a.stylist);
++      var actions = "";
++      if (a.status === "booked") {
++        actions += '<button class="btn ok sm" title="' + esc(t("done")) + '" onclick="Lumiere.setAppointmentStatus(\'' + a.id + '\',\'done\')">✓</button> ' +
++          '<button class="btn warn sm" title="' + esc(t("appt_status_noshow")) + '" onclick="Lumiere.setAppointmentStatus(\'' + a.id + '\',\'no-show\')">✕</button>';
++      }
++      actions += ' <button class="btn ghost sm" title="' + esc(t("edit")) + '" onclick="Lumiere.startAppointmentForm(\'edit\',\'' + a.id + '\')">' + icon("edit", 13) + '</button>';
++      if (a.status !== "cancelled") {
++        actions += ' <button class="btn danger sm" title="' + esc(t("appt_status_cancelled")) + '" onclick="Lumiere.cancelAppointment(\'' + a.id + '\')">✖</button>';
++      }
+       html += '<div class="appointment-row">' +
+-        '<div class="time">' + esc(a.date.slice(5) + " · " + a.time) + '</div>' +
++        '<div class="time">' + esc(a.time) + '</div>' +
+         '<div>' + esc(c ? c.name : a.client) + '</div>' +
+         '<div>' + svcName(a.service) + '</div>' +
+         '<div>' + esc(s ? s.name : a.stylist) + '</div>' +
+-        '<div>' + statusBadge(a.status) + '</div></div>';
++        '<div>' + statusBadge(a.status) + '</div>' +
++        '<div style="display:flex;gap:6px">' + actions + '</div></div>';
+     });
++
++    html += '<div class="appt-summary">' + t("appt_total") + ' ' + apps.length +
++      ' · ' + t("booked") + ' ' + counts.booked +
++      ' · ' + t("done") + ' ' + counts.done +
++      ' · ' + t("appt_status_noshow") + ' ' + counts["no-show"] +
++      ' · ' + t("appt_status_cancelled") + ' ' + counts.cancelled + '</div>';
+     return html + '</div>';
+   }
+ 
+@@ -1934,6 +2469,7 @@ window.LUMIERE_DATA = {
+     checkout = { client: "", stylist: "", assistant: "", lines: [], payments: {} };
+     save();
+     msg.textContent = t("saved");
++    toast(t("saved"));
+     sec = "sales";
+     render();
+   }
+@@ -1942,6 +2478,7 @@ window.LUMIERE_DATA = {
+     var html = '<div class="toolbar"><h2>👥 ' + t("sec_clients") + '</h2>' +
+       '<span class="spacer"></span>' +
+       '<div class="search-box">' + icon("search", 14) + '<input id="clientSearch" type="text" placeholder="' + esc(t("client_search_ph")) + '" oninput="Lumiere.filterClients(this.value)"></div>' +
++      '<button class="btn ghost" onclick="Lumiere.exportClientsCSV()">⬇ ' + t("data_export_clients") + '</button>' +
+       '<button class="btn" onclick="Lumiere.startClientForm()">' + icon("plus", 14) + ' ' + t("add_client") + '</button></div>';
+ 
+     if (editTarget && editTarget.kind === "client") html += renderClientForm();
+@@ -1966,7 +2503,7 @@ window.LUMIERE_DATA = {
+     if (canEdit()) {
+       html += '<button class="btn" onclick="Lumiere.startStaffForm()">' + icon("plus", 14) + ' ' + t("add_staff") + '</button>';
+     }
+-    html += '</div>';
++    html += '<button class="btn ghost" onclick="Lumiere.exportStaffCSV()">⬇ ' + t("data_export_staff") + '</button></div>';
+ 
+     if (editTarget && editTarget.kind === "staff") html += renderStaffForm();
+ 
+@@ -2002,8 +2539,20 @@ window.LUMIERE_DATA = {
+     return html + table(rows, { numCols: [3] });
+   }
+ 
++  function lowStockItems() {
++    var out = [];
++    Object.keys(D.products).forEach(function (k) {
++      var p = D.products[k];
++      if (p.stock <= p.reorder) out.push([k, p]);
++    });
++    return out.sort(function (a, b) { return (a[1].stock - a[1].reorder) - (b[1].stock - b[1].reorder); });
++  }
++
+   function renderProducts() {
++    var low = lowStockItems();
+     var html = '<div class="toolbar"><h2>🧴 ' + t("sec_products") + '</h2><span class="spacer"></span>';
++    if (low.length) html += '<span class="badge danger" style="margin-right:8px">⚠ ' + t("low") + ' ' + low.length + '</span>';
++    html += '<button class="btn ghost" onclick="Lumiere.exportProductsCSV()">⬇ ' + t("data_export_products") + '</button>';
+     if (canEdit()) {
+       html += '<button class="btn" onclick="Lumiere.startProductForm()">' + icon("plus", 14) + ' ' + t("btn_new_product") + '</button>';
+     }
+@@ -2011,15 +2560,30 @@ window.LUMIERE_DATA = {
+ 
+     if (editTarget && editTarget.kind === "product") html += renderProductForm();
+ 
++    if (low.length) {
++      html += '<div class="card reorder-panel"><h3>📦 ' + t("reorder_list") + ' (' + low.length + ')</h3>';
++      low.forEach(function (it) {
++        var k = it[0], p = it[1];
++        html += '<div class="reorder-row">' +
++          '<span class="reorder-name">' + esc(prodName(k)) + '</span>' +
++          '<span class="muted">' + t("stock") + ': ' + p.stock + ' · ' + t("reorder") + ': ' + p.reorder + '</span>' +
++          (canEdit() ? '<button class="btn ghost sm" onclick="Lumiere.restockProduct(\'' + k + '\')">' + icon("plus", 13) + ' ' + t("restock") + '</button>' : '') +
++          '</div>';
++      });
++      html += '</div>';
++    }
++
+     var rows = [["", t("name"), t("price"), t("stock"), t("reorder"), t("status"), ""]];
+     Object.keys(D.products).forEach(function (k) {
+       var p = D.products[k];
+-      var low = p.stock <= p.reorder;
+-      var actions = canEdit()
+-        ? '<button class="btn ghost sm" onclick="Lumiere.startProductForm(\'edit\',\'' + k + '\')">' + icon("edit", 13) + '</button> ' +
+-          '<button class="btn danger sm" onclick="Lumiere.deleteProduct(\'' + k + '\')">' + icon("trash", 13) + '</button>'
+-        : "";
+-      rows.push([k, prodName(k), ars(p.price_ars), p.stock, p.reorder, low ? '<span class="badge danger">' + t("low") + '</span>' : '<span class="badge ok">' + t("ok") + '</span>', actions]);
++      var lowRow = p.stock <= p.reorder;
++      var actions = "";
++      if (canEdit()) {
++        actions += '<button class="btn ghost sm" onclick="Lumiere.startProductForm(\'edit\',\'' + k + '\')">' + icon("edit", 13) + '</button> ';
++        if (lowRow) actions += '<button class="btn warn sm" title="' + esc(t("restock")) + '" onclick="Lumiere.restockProduct(\'' + k + '\')">+</button> ';
++        actions += '<button class="btn danger sm" onclick="Lumiere.deleteProduct(\'' + k + '\')">' + icon("trash", 13) + '</button>';
++      }
++      rows.push([k, prodName(k), ars(p.price_ars), p.stock, p.reorder, lowRow ? '<span class="badge danger">' + t("low") + '</span>' : '<span class="badge ok">' + t("ok") + '</span>', actions]);
+     });
+     return html + table(rows, { numCols: [1, 2, 3] });
+   }
+@@ -2054,6 +2618,96 @@ window.LUMIERE_DATA = {
+     return html;
+   }
+ 
++  function clientLastVisit(c) {
++    var v = (c.visits || []).slice().sort();
++    return v.length ? v[v.length - 1] : (c.first_visit || "");
++  }
++
++  function renderCare() {
++    var html = '<div class="toolbar"><h2>💖 ' + t("sec_care") + '</h2></div>';
++    html += '<p class="muted" style="margin-bottom:16px">' + t("care_note") + '</p>';
++
++    var dueDays = 30;
++    var due = D.clients.filter(function (c) {
++      var last = clientLastVisit(c);
++      return !!last && daysBetween(last, state.today) > dueDays;
++    }).sort(function (a, b) {
++      return daysBetween(clientLastVisit(b), state.today) - daysBetween(clientLastVisit(a), state.today);
++    });
++
++    html += sectionTitle("⏰ " + t("care_due_title") + " (> " + dueDays + "d)");
++    if (due.length) {
++      var dueRows = [[t("client"), t("care_last_visit"), t("care_days_since"), t("visits")]];
++      due.forEach(function (c) {
++        var last = clientLastVisit(c);
++        dueRows.push([esc(c.name), last, daysBetween(last, state.today), (c.visits || []).length]);
++      });
++      html += table(dueRows, { numCols: [2, 3] });
++    } else {
++      html += '<div class="card"><h3>' + t("care_none_due") + '</h3></div>';
++    }
++
++    var ns = {};
++    D.appointments.forEach(function (a) {
++      if (a.status === "no-show") ns[a.client] = (ns[a.client] || 0) + 1;
++    });
++    var nsArr = Object.keys(ns).map(function (k) { return { id: k, n: ns[k] }; }).sort(function (a, b) { return b.n - a.n; });
++
++    html += sectionTitle("🚫 " + t("care_noshow_title"));
++    if (nsArr.length) {
++      var nsRows = [[t("client"), t("care_noshows")]];
++      nsArr.forEach(function (x) {
++        var c = clientById(x.id);
++        nsRows.push([esc(c ? c.name : x.id), x.n]);
++      });
++      html += table(nsRows, { numCols: [1] });
++    } else {
++      html += '<div class="card"><h3>' + t("care_none_noshow") + '</h3></div>';
++    }
++
++    var byC = groupBy(D.tickets, function (t) { return t.client; });
++    var spend = Object.keys(byC).map(function (k) {
++      var c = clientById(k);
++      return { id: k, name: c ? c.name : k, spend: sum(byC[k].map(ticketTotal)), visits: c ? (c.visits || []).length : byC[k].length };
++    }).sort(function (a, b) { return b.spend - a.spend; }).slice(0, 6);
++
++    html += sectionTitle("👑 " + t("care_vip_title"));
++    var vipRows = [["#", t("client"), t("visits"), t("total") + " ARS"]];
++    spend.forEach(function (s, i) {
++      vipRows.push(["#" + (i + 1), esc(s.name), s.visits, ars(s.spend)]);
++    });
++    html += table(vipRows, { numCols: [2, 3] });
++
++    return html;
++  }
++
++  function renderData() {
++    var html = '<div class="toolbar"><h2>🗄️ ' + t("sec_data") + '</h2></div>';
++    html += '<p class="muted" style="margin-bottom:16px">' + t("data_note") + '</p>';
++
++    html += '<div class="grid cols-2">';
++
++    html += '<div class="card"><h3>💾 ' + t("data_backup") + '</h3>';
++    html += '<p class="muted">' + t("data_backup_desc") + '</p>';
++    html += '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
++      '<button class="btn" onclick="Lumiere.exportBackup()">⬇ ' + t("data_backup") + ' (.json)</button>' +
++      '<button class="btn ghost" onclick="Lumiere.exportMarkdown()">📄 ' + t("data_export_md") + '</button></div></div>';
++
++    html += '<div class="card"><h3>📥 ' + t("data_restore") + '</h3>';
++    html += '<p class="muted">' + t("data_import_hint") + '</p>';
++    html += '<div class="form-row" style="grid-template-columns:1fr auto;align-items:end">' +
++      '<input type="file" id="dataImport" accept="application/json,.json">' +
++      '<button class="btn" onclick="Lumiere.importBackup()">' + t("data_restore") + '</button></div>' +
++      '<span id="dataMsg" class="muted" style="display:block;margin-top:8px"></span></div>';
++
++    html += '<div class="card"><h3>🔄 ' + t("data_reset") + '</h3>';
++    html += '<p class="muted">' + t("data_reset_desc") + '</p>';
++    html += '<button class="btn danger" onclick="Lumiere.resetData()">' + t("data_reset") + '</button></div>';
++
++    html += '</div>';
++    return html;
++  }
++
+   /* ------------------------- Analytics ------------------------- */
+ 
+   function bucketsFor(period) {
+@@ -2102,7 +2756,11 @@ window.LUMIERE_DATA = {
+     returning: { money: false },
+     new_clients: { money: false },
+     product_qty: { money: false },
+-    commission: { money: true }
++    commission: { money: true },
++    services_rev: { money: true },
++    products_rev: { money: true },
++    returning_rate: { money: false },
++    avg_frequency: { money: false }
+   };
+ 
+   var WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+@@ -2115,6 +2773,12 @@ window.LUMIERE_DATA = {
+     return Math.round(sv * r.service / 100 + pr * r.product / 100 + sv * a.service / 100 + pr * a.product / 100);
+   }
+ 
++  function distinctClients(tickets) {
++    var seen = {};
++    tickets.forEach(function (t) { seen[t.client] = true; });
++    return Object.keys(seen).length;
++  }
++
+   function metricValue(metric, tickets, from, to) {
+     var rev = sum(tickets.map(ticketTotal));
+     switch (metric) {
+@@ -2127,6 +2791,14 @@ window.LUMIERE_DATA = {
+         return tickets.filter(function (t) { var c = clientById(t.client); return !!(c && c.first_visit === t.date); }).length;
+       case "product_qty": return sum(tickets.map(function (t) { return sum(ticketProducts(t).map(function (l) { return l.q; })); }));
+       case "commission": return sum(tickets.map(ticketCommission));
++      case "services_rev": return sum(tickets.map(function (t) { return sum(ticketServices(t).map(lineTotal)); }));
++      case "products_rev": return sum(tickets.map(function (t) { return sum(ticketProducts(t).map(lineTotal)); }));
++      case "returning_rate":
++        return tickets.length ? Math.round(tickets.filter(isReturning).length / tickets.length * 100) : 0;
++      case "avg_frequency": {
++        var dc = distinctClients(tickets);
++        return dc ? Math.round(tickets.length / dc * 10) / 10 : 0;
++      }
+     }
+     return 0;
+   }
+@@ -2286,8 +2958,12 @@ window.LUMIERE_DATA = {
+       ["visits", "🧾 " + t("metric_visits")],
+       ["avg_ticket", "🎟️ " + t("metric_avg_ticket")],
+       ["returning", "🔁 " + t("metric_returning")],
++      ["returning_rate", "🔁 " + t("metric_returning_rate") + " %"],
+       ["new_clients", "🆕 " + t("metric_new_clients")],
++      ["avg_frequency", "👥 " + t("metric_avg_frequency")],
+       ["product_qty", "🧴 " + t("metric_product_qty")],
++      ["services_rev", "✂️ " + t("metric_services_rev")],
++      ["products_rev", "🧴 " + t("metric_products_rev")],
+       ["commission", "💵 " + t("metric_commission")]
+     ];
+   }
+@@ -2338,6 +3014,40 @@ window.LUMIERE_DATA = {
+     }).join("") + '</select>');
+   }
+ 
++  function nlSuggestList() {
++    return lang === "es" ? [
++      "Ingresos por servicio este mes",
++      "Visitas por equipo esta semana",
++      "Ticket promedio por día últimos 30 días",
++      "Comisiones por equipo este mes",
++      "Ingresos por método de pago este mes",
++      "Clientes nuevos este mes"
++    ] : [
++      "Revenue by service this month",
++      "Visits by staff this week",
++      "Average ticket by day last 30 days",
++      "Commission by staff this month",
++      "Revenue by payment method this month",
++      "New clients this month"
++    ];
++  }
++
++  function renderNLBox() {
++    var mic = NaturalQuery.speechSupported()
++      ? '<div class="form-field" style="align-self:end"><button class="btn ghost" id="nlMic" onclick="Lumiere.startVoice()">🎤 ' + t("nl_mic") + '</button></div>'
++      : "";
++    return '<div class="card nl-card"><h3>🎙 ' + t("nl_title") + '</h3>' +
++      '<div class="form-row" style="grid-template-columns:1fr auto auto;align-items:end">' +
++      '<div class="form-field full"><input id="nlInput" placeholder="' + esc(t("nl_placeholder")) + '" value="' + esc(nlText) + '" onkeydown="if(event.key===\'Enter\')Lumiere.runNaturalQuery()"></div>' +
++      '<div class="form-field" style="align-self:end"><button class="btn" onclick="Lumiere.runNaturalQuery()">⚡ ' + t("nl_run") + '</button></div>' +
++      mic +
++      '</div>' +
++      '<div class="nl-suggestions">' + nlSuggestList().map(function (x, i) {
++        return '<button class="chip" onclick="Lumiere.askNatural(' + i + ')">' + esc(x) + '</button>';
++      }).join("") + '</div>' +
++      '<div id="nlMsg"></div></div>';
++  }
++
+   function renderBuilder() {
+     var q = analyticsDraft || { metric: "revenue", dimension: "day", compare: "", chart: "auto", period: analyticsPeriod, staff: "", gender: "", payment: "", limit: 10 };
+     return '<div class="card"><h3>🧪 ' + t("analytics_builder") + '</h3>' +
+@@ -2442,7 +3152,11 @@ window.LUMIERE_DATA = {
+ 
+   function renderQueryResult(q) {
+     var isMoney = METRICS[q.metric] && METRICS[q.metric].money;
+-    var fv = function (v) { return isMoney ? ars(v) : fmt(v); };
++    var fv = function (v) {
++      if (isMoney) return ars(v);
++      if (q.metric === "avg_frequency") return String(v);
++      return fmt(v);
++    };
+     if (q.chart === "heatmap") {
+       return '<div class="card chart-card"><h3>' + esc(queryTitle(q)) + '</h3>' + heatmapChartForQuery(q) + '</div>';
+     }
+@@ -2481,6 +3195,7 @@ window.LUMIERE_DATA = {
+       periodSeg() +
+       '<button class="btn ghost" onclick="Lumiere.exportCSV()">⬇ ' + t("export_csv") + '</button></div>';
+     html += '<p class="muted" style="margin-bottom:16px">' + t("analytics_builder_note") + '</p>';
++    html += renderNLBox();
+     html += renderBuilder();
+ 
+     if (analyticsDraft) {
+@@ -2564,6 +3279,16 @@ window.LUMIERE_DATA = {
+     });
+     html += '</div>';
+ 
++    html += '<div class="card"><h3>🔐 ' + t("receptionist_access") + '</h3>';
++    html += '<p class="muted">' + t("receptionist_access_note") + '</p>';
++    var rsAllowed = s.receptionistSections;
++    PUBLIC_SECTIONS.forEach(function (k) {
++      var on = rsAllowed ? rsAllowed.indexOf(k) > -1 : true;
++      html += '<label class="rule-row"><span>' + t("sec_" + k) + '</span>' +
++        '<input type="checkbox" id="rs_' + k + '"' + (on ? " checked" : "") + ' onchange="Lumiere.toggleReceptionistSection(\'' + k + '\',this.checked)"></label>';
++    });
++    html += '</div>';
++
+     html += '</div>';
+ 
+     html += sectionTitle("✨ " + t("custom_rules"));
+@@ -2680,7 +3405,9 @@ window.LUMIERE_DATA = {
+     commission: renderCommissionRates,
+     reports: renderReports,
+     analytics: renderAnalytics,
+-    rules: renderRules
++    rules: renderRules,
++    data: renderData,
++    care: renderCare
+   };
+ 
+   /* ------------------------- Clock & open/closed ------------------------- */
+@@ -2806,8 +3533,9 @@ window.LUMIERE_DATA = {
+     return s;
+   }
+ 
+-  function downloadFile(name, text) {
+-    var blob = new Blob([text], { type: "text/csv;charset=utf-8;" });
++  function downloadFile(name, text, mime) {
++    var type = mime || "text/csv;charset=utf-8;";
++    var blob = new Blob([text], { type: type });
+     var url = URL.createObjectURL(blob);
+     var a = document.createElement("a");
+     a.href = url;
+@@ -2831,17 +3559,198 @@ window.LUMIERE_DATA = {
+     return rows.map(function (r) { return r.map(csvEscape).join(","); }).join("\n");
+   }
+ 
++  function buildClientsCSV() {
++    var rows = [["ID", "Name", "Line", "Phone", "First visit", "Visits"]];
++    D.clients.forEach(function (c) {
++      rows.push([c.id, c.name, t(c.gender_line === "men" ? "mens" : "womens"), c.phone || "", c.first_visit || "", (c.visits || []).join(" | ")]);
++    });
++    return rows.map(function (r) { return r.map(csvEscape).join(","); }).join("\n");
++  }
++
++  function buildStaffCSV() {
++    var rows = [["ID", "Name", "Role", "Shift", "Status"]];
++    D.staff.forEach(function (s) {
++      rows.push([s.id, s.name, s.role, s.shift || "", s.status || "active"]);
++    });
++    return rows.map(function (r) { return r.map(csvEscape).join(","); }).join("\n");
++  }
++
++  function buildProductsCSV() {
++    var rows = [["Key", "Name (EN)", "Name (ES)", "Price ARS", "Stock", "Reorder"]];
++    Object.keys(D.products).forEach(function (k) {
++      var p = D.products[k];
++      rows.push([k, p.name_en, p.name_es, p.price_ars, p.stock, p.reorder]);
++    });
++    return rows.map(function (r) { return r.map(csvEscape).join(","); }).join("\n");
++  }
++
++  function buildBackupJSON() {
++    return JSON.stringify({
++      app: "lumiere-pos", version: 1, exportedAt: new Date().toISOString(),
++      data: D,
++      analyticsQueries: analyticsQueries ? clone(analyticsQueries) : []
++    }, null, 2);
++  }
++
++  function buildMarkdown() {
++    var L = [];
++    var push = function () {
++      L.push.apply(L, Array.prototype.slice.call(arguments));
++      L.push("");
++    };
++    push("# Lumiere POS — Records export");
++    push("> Generated " + new Date().toLocaleString() + " · prices in ARS");
++
++    push("## Clients (" + D.clients.length + ")");
++    push("| ID | Name | Line | Phone | First visit | Visits |");
++    push("|---|---|---|---|---|---|");
++    D.clients.forEach(function (c) {
++      push("| " + c.id + " | " + c.name + " | " + (c.gender_line || "") + " | " + (c.phone || "") + " | " + (c.first_visit || "") + " | " + ((c.visits || []).length) + " |");
++    });
++
++    push("## Staff (" + D.staff.length + ")");
++    push("| ID | Name | Role | Shift | Status |");
++    push("|---|---|---|---|---|");
++    D.staff.forEach(function (s) {
++      push("| " + s.id + " | " + s.name + " | " + s.role + " | " + (s.shift || "") + " | " + (s.status || "active") + " |");
++    });
++
++    push("## Services (" + Object.keys(D.services).length + ")");
++    push("| Key | Name | Group | Price ARS |");
++    push("|---|---|---|---|");
++    Object.keys(D.services).forEach(function (k) {
++      push("| " + k + " | " + svcName(k) + " | " + D.services[k].group + " | " + D.services[k].price_ars + " |");
++    });
++
++    push("## Products (" + Object.keys(D.products).length + ")");
++    push("| Key | Name | Stock | Reorder | Price ARS |");
++    push("|---|---|---|---|---|");
++    Object.keys(D.products).forEach(function (k) {
++      var p = D.products[k];
++      push("| " + k + " | " + prodName(k) + " | " + p.stock + " | " + p.reorder + " | " + p.price_ars + " |");
++    });
++
++    var sales = D.tickets.slice().sort(function (a, b) { return a.date < b.date ? -1 : 1; });
++    push("## Sales (" + sales.length + ")");
++    push("| Date | Seq | Client | Stylist | Total ARS | Items |");
++    push("|---|---|---|---|---|---|");
++    sales.forEach(function (tk) {
++      var c = clientById(tk.client), s = staffById(tk.stylist);
++      var items = tk.lines.map(function (l) {
++        return (l.t === "service" ? svcName(l.k) : prodName(l.k)) + " x" + l.q;
++      }).join(", ");
++      push("| " + tk.date + " | " + tk.seq + " | " + (c ? c.name : tk.client) + " | " + (s ? s.name : tk.stylist) + " | " + ticketTotal(tk) + " | " + items + " |");
++    });
++
++    push("## Appointments (" + D.appointments.length + ")");
++    push("| Date | Time | Client | Stylist | Service | Status |");
++    push("|---|---|---|---|---|---|");
++    D.appointments.slice().sort(function (a, b) { return (a.date + a.time) < (b.date + b.time) ? -1 : 1; }).forEach(function (a) {
++      var c = clientById(a.client), s = staffById(a.stylist);
++      push("| " + a.date + " | " + a.time + " | " + (c ? c.name : a.client) + " | " + (s ? s.name : a.stylist) + " | " + svcName(a.service) + " | " + a.status + " |");
++    });
++
++    return L.join("\n");
++  }
++
+   /* ------------------------- window.Lumiere API ------------------------- */
+ 
+   window.Lumiere = {
+     navigate: navigate,
+-    newAppointment: function () { alert(t("demo_new_appt")); },
+ 
+     addCheckoutLine: addCheckoutLine,
+     removeCheckoutLine: removeCheckoutLine,
+     completeCheckout: completeCheckout,
+ 
+     exportCSV: function () { downloadFile("lumiere-sales.csv", buildSalesCSV()); },
++    exportClientsCSV: function () { downloadFile("lumiere-clients.csv", buildClientsCSV()); },
++    exportStaffCSV: function () { downloadFile("lumiere-staff.csv", buildStaffCSV()); },
++    exportProductsCSV: function () { downloadFile("lumiere-products.csv", buildProductsCSV()); },
++
++    exportBackup: function () { downloadFile("lumiere-backup.json", buildBackupJSON(), "application/json"); },
++    exportMarkdown: function () { downloadFile("lumiere-records.md", buildMarkdown(), "text/markdown;charset=utf-8"); },
++
++    importBackup: function () {
++      var input = document.getElementById("dataImport");
++      var file = input && input.files && input.files[0];
++      var msg = document.getElementById("dataMsg");
++      if (!file) { if (msg) msg.textContent = t("data_pick_file"); return; }
++      var reader = new FileReader();
++      reader.onload = function (ev) {
++        try {
++          var parsed = JSON.parse(ev.target.result);
++          var data = parsed.data || parsed;
++          if (!data.clients || !data.tickets || !data.staff || !data.services || !data.products) throw new Error("shape");
++          if (!data.settings || !data.meta) throw new Error("shape");
++          D = data;
++          if (parsed.analyticsQueries && Array.isArray(parsed.analyticsQueries)) {
++            analyticsQueries = clone(parsed.analyticsQueries);
++            saveQueries();
++          }
++          state.today = D.meta.today; state.weekStart = D.meta.weekStart; state.weekEnd = D.meta.weekEnd;
++          editTarget = null; checkout = { client: "", stylist: "", assistant: "", lines: [], payments: {} };
++          save();
++          if (msg) msg.textContent = t("data_restored");
++          render(); toast(t("data_restored"));
++        } catch (e) {
++          if (msg) msg.textContent = t("data_bad_file");
++        }
++      };
++      reader.readAsText(file);
++    },
++    resetData: function () {
++      if (!confirm(t("data_reset_confirm"))) return;
++      D = clone(SEED);
++      analyticsQueries = null;
++      apptViewDate = "";
++      state.today = D.meta.today; state.weekStart = D.meta.weekStart; state.weekEnd = D.meta.weekEnd;
++      editTarget = null; checkout = { client: "", stylist: "", assistant: "", lines: [], payments: {} };
++      save(); render(); toast(t("data_reset_done"));
++    },
++
++    restockProduct: function (k) {
++      var p = D.products[k];
++      if (!p) return;
++      p.stock = Math.max(p.reorder || D.settings.lowStockDefault || 5, 1) * 2;
++      save(); render(); toast(t("restocked"));
++    },
++
++    startAppointmentForm: function (mode, id) { editTarget = { kind: "appointment", mode: mode || "add", id: id || null }; render(); },
++    saveAppointment: function () {
++      var date = inputVal("apDate", "").trim();
++      var time = inputVal("apTime", "").trim();
++      var client = inputVal("apClient", "");
++      var service = inputVal("apSvc", "");
++      var stylist = inputVal("apStylist", "");
++      var msg = document.getElementById("apMsg");
++      var fail = function (m) { if (msg) msg.textContent = m; };
++      if (!date || !time) return fail(t("appt_need_date_time"));
++      var open = toMin(D.settings.openTime), close = toMin(D.settings.closeTime), tm = toMin(time);
++      if (tm < open || tm > close) return fail(t("appt_outside_hours"));
++      var exclude = editTarget.id || null;
++      var conflict = D.appointments.some(function (a) {
++        return a.id !== exclude && a.date === date && a.time === time && a.stylist === stylist && a.status !== "cancelled";
++      });
++      if (conflict) return fail(t("appt_conflict"));
++      if (editTarget.id) {
++        var a = appointmentById(editTarget.id);
++        if (a) {
++          a.date = date; a.time = time; a.client = client; a.service = service; a.stylist = stylist;
++          if (editTarget.mode === "edit") a.status = inputVal("apStatus", a.status);
++        }
++      } else {
++        D.appointments.push({ id: "app-" + Date.now(), date: date, time: time, client: client, stylist: stylist, service: service, status: "booked" });
++      }
++      apptViewDate = date;
++      save(); editTarget = null; render(); toast(t("saved_changes"));
++    },
++    setAppointmentStatus: function (id, status) {
++      var a = appointmentById(id);
++      if (!a) return;
++      a.status = status;
++      save(); render();
++    },
++    cancelAppointment: function (id) { this.setAppointmentStatus(id, "cancelled"); },
+ 
+     filterClients: function (q) {
+       searchQ = q || "";
+@@ -2871,11 +3780,13 @@ window.LUMIERE_DATA = {
+       } else {
+         D.clients.push({ id: nextClientId(), name: name, gender_line: gender, phone: phone, first_visit: state.today, visits: [], status: "active" });
+       }
+-      save(); editTarget = null; render();
++      save(); editTarget = null; render(); toast(t("saved_changes"));
+     },
+     deleteClient: function (id) {
+-      D.clients = D.clients.filter(function (c) { return c.id !== id; });
+-      save(); render();
++      var c = clientById(id);
++      if (!confirmDelete(c ? c.name : id)) return;
++      D.clients = D.clients.filter(function (x) { return x.id !== id; });
++      save(); render(); toast(t("deleted"));
+     },
+ 
+     saveStaff: function () {
+@@ -2891,12 +3802,14 @@ window.LUMIERE_DATA = {
+         var id = r + "-" + (String(D.staff.length + 1).padStart(3, "0")) + "-" + slug(name);
+         D.staff.push({ id: id, name: name, role: r, shift: sh, status: st });
+       }
+-      save(); editTarget = null; render();
++      save(); editTarget = null; render(); toast(t("saved_changes"));
+     },
+     deleteStaff: function (id) {
+-      D.staff = D.staff.filter(function (s) { return s.id !== id; });
++      var s = staffById(id);
++      if (!confirmDelete(s ? s.name : id)) return;
++      D.staff = D.staff.filter(function (x) { return x.id !== id; });
+       delete D.commissionRates[id];
+-      save(); render();
++      save(); render(); toast(t("deleted"));
+     },
+ 
+     saveService: function () {
+@@ -2913,11 +3826,12 @@ window.LUMIERE_DATA = {
+         while (D.services[key]) key += "-" + Math.floor(Math.random() * 90 + 10);
+         D.services[key] = { name_en: nameEn, name_es: nameEs || nameEn, group: grp, price_ars: price };
+       }
+-      save(); editTarget = null; render();
++      save(); editTarget = null; render(); toast(t("saved_changes"));
+     },
+     deleteService: function (k) {
++      if (!confirmDelete(svcName(k))) return;
+       delete D.services[k];
+-      save(); render();
++      save(); render(); toast(t("deleted"));
+     },
+ 
+     saveProduct: function () {
+@@ -2935,11 +3849,12 @@ window.LUMIERE_DATA = {
+         while (D.products[key]) key += "-" + Math.floor(Math.random() * 90 + 10);
+         D.products[key] = { name_en: nameEn, name_es: nameEs || nameEn, price_ars: price, stock: stock, reorder: reorder };
+       }
+-      save(); editTarget = null; render();
++      save(); editTarget = null; render(); toast(t("saved_changes"));
+     },
+     deleteProduct: function (k) {
++      if (!confirmDelete(prodName(k))) return;
+       delete D.products[k];
+-      save(); render();
++      save(); render(); toast(t("deleted"));
+     },
+ 
+     saveRates: function () {
+@@ -2948,7 +3863,16 @@ window.LUMIERE_DATA = {
+         var pv = parseFloat(inputVal("rate_" + s.id + "_p", "0"));
+         D.commissionRates[s.id] = { service: isNaN(sv) ? 0 : sv, product: isNaN(pv) ? 0 : pv };
+       });
+-      save(); render();
++      save(); render(); toast(t("saved_changes"));
++    },
++
++    toggleReceptionistSection: function (secKey, checked) {
++      var list = D.settings.receptionistSections;
++      if (!Array.isArray(list)) list = D.settings.receptionistSections = PUBLIC_SECTIONS.slice();
++      var idx = list.indexOf(secKey);
++      if (checked && idx === -1) list.push(secKey);
++      if (!checked && idx > -1) list.splice(idx, 1);
++      save();
+     },
+ 
+     setAnalyticsPeriod: function (p) {
+@@ -2968,6 +3892,53 @@ window.LUMIERE_DATA = {
+       lastQueryResult = analyticsGroups(analyticsDraft);
+       render();
+     },
++    runNaturalQuery: function () {
++      var input = document.getElementById("nlInput");
++      var text = (input ? input.value : "").trim();
++      if (!text) return;
++      var res = NaturalQuery.parse(text, D, lang);
++      if (!res || res.type !== "query") {
++        nlText = text;
++        render();
++        var msg = document.getElementById("nlMsg");
++        if (msg) msg.innerHTML = '<p class="muted">' + t("nl_unknown") + '</p><div class="nl-suggestions">' +
++          nlSuggestList().map(function (x, i) {
++            return '<button class="chip" onclick="Lumiere.askNatural(' + i + ')">' + esc(x) + '</button>';
++          }).join("") + '</div>';
++        return;
++      }
++      nlText = text;
++      analyticsDraft = res.q;
++      lastQueryResult = analyticsGroups(res.q);
++      render();
++      var msg2 = document.getElementById("nlMsg");
++      if (msg2) msg2.innerHTML = '<p class="nl-confirm">' + esc(res.summary) + '</p>';
++      toast(res.summary);
++    },
++    askNatural: function (i) {
++      var list = nlSuggestList();
++      if (!list[i]) return;
++      var input = document.getElementById("nlInput");
++      if (input) input.value = list[i];
++      this.runNaturalQuery();
++    },
++    startVoice: function () {
++      try {
++        if (!NaturalQuery.speechSupported()) { toast(t("nl_voice_unsupported")); return; }
++        var mic = document.getElementById("nlMic");
++        if (mic) mic.textContent = "⏺ " + t("nl_listening");
++        NaturalQuery.recognize(lang, function (txt) {
++          var input = document.getElementById("nlInput");
++          if (input) input.value = txt;
++          var m = document.getElementById("nlMsg");
++          if (m) m.innerHTML = "";
++          Lumiere.runNaturalQuery();
++        }, function () {
++          var micEl = document.getElementById("nlMic");
++          if (micEl) micEl.textContent = "🎤 " + t("nl_mic");
++        }, function () { toast(t("nl_error")); });
++      } catch (e) { toast(t("nl_error")); }
++    },
+     saveAnalyticsQuery: function () {
+       readDraftFromForm();
+       var q = { id: "q" + Date.now() };
+@@ -3055,7 +4026,7 @@ window.LUMIERE_DATA = {
+ 
+   document.addEventListener("change", function (e) {
+     if (e.target && e.target.id === "apptDate") {
+-      state.today = e.target.value;
++      apptViewDate = e.target.value;
+       render();
+     }
+   });
+@@ -3079,6 +4050,14 @@ window.LUMIERE_DATA = {
+ 
+   setInterval(updateClock, 1000);
+ 
++  if (typeof navigator !== "undefined" && "serviceWorker" in navigator &&
++      typeof location !== "undefined" &&
++      (location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1")) {
++    window.addEventListener("load", function () {
++      navigator.serviceWorker.register("sw.js").catch(function () {});
++    });
++  }
++
+   render();
+   updateClock();
+ })();
+diff --git a/Lumiere-pos/dashboard/manifest.json b/Lumiere-pos/dashboard/manifest.json
+new file mode 100644
+index 0000000..bbdf7c7
+--- /dev/null
++++ b/Lumiere-pos/dashboard/manifest.json
+@@ -0,0 +1,19 @@
++{
++  "name": "Lumiere POS Dashboard",
++  "short_name": "Lumiere POS",
++  "description": "Point-of-sale dashboard for a beauty salon: sales, clients, staff, commissions and analytics.",
++  "start_url": "./index.html",
++  "scope": "./",
++  "display": "standalone",
++  "background_color": "#0e0e11",
++  "theme_color": "#0e0e11",
++  "lang": "en",
++  "icons": [
++    {
++      "src": "icon.svg",
++      "sizes": "any",
++      "type": "image/svg+xml",
++      "purpose": "any"
++    }
++  ]
++}
+diff --git a/Lumiere-pos/dashboard/nl.js b/Lumiere-pos/dashboard/nl.js
+new file mode 100644
+index 0000000..fa25d46
+--- /dev/null
++++ b/Lumiere-pos/dashboard/nl.js
+@@ -0,0 +1,286 @@
++(function (global) {
++  "use strict";
++
++  /* Deterministic, bilingual (EN/ES) natural-language analytics parser.
++     Maps a plain-language question onto the dashboard's analytics query
++     object q = { metric, dimension, compare, chart, period, staff, gender,
++     payment, limit, from, to }. No external services; fully offline. */
++
++  function norm(s) { return String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim(); }
++  function pad2(n) { return (n < 10 ? "0" : "") + n; }
++  function fmtDate(dt) { return dt.getFullYear() + "-" + pad2(dt.getMonth() + 1) + "-" + pad2(dt.getDate()); }
++  function addDaysStr(d, n) { var dt = new Date(d + "T00:00:00"); dt.setDate(dt.getDate() + n); return fmtDate(dt); }
++  function addMonthsStr(d, n) { var dt = new Date(d + "T00:00:00"); var day = dt.getDate(); dt.setMonth(dt.getMonth() + n); if (dt.getDate() < day) dt.setDate(0); return fmtDate(dt); }
++  function todayStr() { return fmtDate(new Date()); }
++  function escRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
++  function matchWord(text, phrase) {
++    return new RegExp("\\b" + escRe(phrase) + "\\b").test(text);
++  }
++  function matchAny(text, words) { for (var i = 0; i < words.length; i++) if (matchWord(text, words[i])) return true; return false; }
++
++  var METRIC_SYN = {
++    en: {
++      services_rev: ["revenue from services", "services revenue", "service revenue", "revenue of services"],
++      products_rev: ["revenue from products", "products revenue", "product revenue", "revenue of products"],
++      returning_rate: ["returning rate", "rebooking rate", "retention rate", "return rate"],
++      avg_ticket: ["average ticket", "avg ticket", "average spend", "average sale", "ticket size", "avg. ticket"],
++      returning: ["returning clients", "returning visits", "repeat clients", "repeating clients"],
++      new_clients: ["new clients", "new customers"],
++      avg_frequency: ["average frequency", "avg visits per client", "visits per client", "frequency of visits"],
++      product_qty: ["products sold", "product quantity", "units sold"],
++      commission: ["commission", "commissions"],
++      revenue: ["revenue", "sales", "income", "takings", "turnover", "earnings"],
++      visits: ["visits", "tickets", "attendances", "appointments done"]
++    },
++    es: {
++      services_rev: ["ingresos por servicios", "ingresos de servicios", "facturacion por servicios"],
++      products_rev: ["ingresos por productos", "ingresos de productos", "ventas de productos"],
++      returning_rate: ["tasa de regreso", "tasa de rebooking", "tasa de retencion", "porcentaje de regreso"],
++      avg_ticket: ["ticket promedio", "promedio de ticket", "gasto promedio", "venta promedio", "promedio por ticket"],
++      returning: ["clientes que regresan", "visitas recurrentes", "recurrentes"],
++      new_clients: ["clientes nuevos", "nuevos clientes"],
++      avg_frequency: ["frecuencia promedio", "visitas por cliente", "frecuencia de visitas"],
++      product_qty: ["productos vendidos", "cantidad de productos", "unidades vendidas"],
++      commission: ["comisiones"],
++      revenue: ["ingresos", "ventas", "facturacion", "recaudacion"],
++      visits: ["visitas", "atenciones", "turnos realizados"]
++    }
++  };
++
++  var METRIC_PRIORITY = ["services_rev", "products_rev", "returning_rate", "avg_ticket", "returning", "new_clients", "avg_frequency", "product_qty", "commission", "revenue", "visits"];
++
++  var DIM_SYN = {
++    en: {
++      month: ["by month", "monthly"],
++      week: ["by week", "weekly"],
++      weekday: ["by weekday", "by day of the week", "day of week"],
++      staff: ["by staff", "by stylist", "by employee", "per staff", "per stylist", "by team"],
++      service: ["by service", "by treatment", "per service", "services", "service"],
++      product: ["by product", "per product", "products", "product"],
++      payment: ["by payment method", "by payment", "per payment"],
++      gender: ["by gender", "per gender"],
++      client: ["by client", "per client", "top clients", "top client"],
++      day: ["by day", "daily"]
++    },
++    es: {
++      month: ["por mes", "mensual"],
++      week: ["por semana", "semanal"],
++      weekday: ["por dia de la semana", "dia de la semana"],
++      staff: ["por equipo", "por estilista", "por empleado"],
++      service: ["por servicio", "por tratamiento", "servicios", "servicio"],
++      product: ["por producto", "productos", "producto"],
++      payment: ["por metodo de pago", "por pago"],
++      gender: ["por genero"],
++      client: ["por cliente", "mejores clientes", "top clientes"],
++      day: ["por dia", "diario"]
++    }
++  };
++
++  var CHART_SYN = {
++    en: { line: ["line chart", "trend", "over time"], donut: ["donut", "pie chart", "pie"], "bars-h": ["bar chart", "bars"], heatmap: ["heatmap"] },
++    es: { line: ["linea", "tendencia", "evolucion"], donut: ["donut", "torta", "circular", "pastel"], "bars-h": ["barras", "grafico de barras"], heatmap: ["mapa de calor"] }
++  };
++
++  var GENDER_WORDS = {
++    en: { women: ["women", "female", "ladies"], men: ["men", "male", "gentlemen"] },
++    es: { women: ["mujeres", "femenino", "damas"], men: ["hombres", "masculino", "caballeros"] }
++  };
++
++  var PAYMENT_WORDS = {
++    en: { cash: ["cash", "in cash"], card: ["card", "credit card", "debit card"], mobile: ["mobile payment", "mobile"], gift_card: ["gift card"], voucher: ["voucher"] },
++    es: { cash: ["efectivo", "en efectivo"], card: ["tarjeta", "tarjeta de credito", "tarjeta de debito"], mobile: ["mercado pago", "pago movil", "movil"], gift_card: ["tarjeta regalo", "gift card"], voucher: ["voucher"] }
++  };
++
++  var WEEKEND_WORDS = { en: ["weekend", "weekends", "friday", "fridays", "saturday", "saturdays"], es: ["fin de semana", "finde", "viernes", "sabado"] };
++
++  function entityMatches(text, list, nameKeys) {
++    var found = [];
++    list.forEach(function (it) {
++      var hit = false;
++      nameKeys.forEach(function (k) {
++        var nm = String(it[k] || "").toLowerCase();
++        if (nm && matchWord(text, nm)) hit = true;
++        var first = nm.split(" ")[0];
++        if (first && first !== nm && matchWord(text, first)) hit = true;
++      });
++      if (hit) found.push(it);
++    });
++    return found;
++  }
++
++  function resolveMetric(text, lang) {
++    var dict = METRIC_SYN[lang] || METRIC_SYN.en;
++    for (var p = 0; p < METRIC_PRIORITY.length; p++) {
++      var key = METRIC_PRIORITY[p];
++      var words = dict[key].slice().sort(function (a, b) { return b.length - a.length; });
++      for (var i = 0; i < words.length; i++) if (matchWord(text, words[i])) return { key: key, matched: true };
++    }
++    return { key: "revenue", matched: false };
++  }
++
++  function resolveDimension(text, lang) {
++    var dict = DIM_SYN[lang] || DIM_SYN.en;
++    var keys = Object.keys(dict);
++    for (var i = 0; i < keys.length; i++) {
++      var words = dict[keys[i]].slice().sort(function (a, b) { return b.length - a.length; });
++      for (var j = 0; j < words.length; j++) if (matchWord(text, words[j])) return { key: keys[i], matched: true };
++    }
++    if (matchAny(text, WEEKEND_WORDS[lang] || WEEKEND_WORDS.en)) return { key: "weekday", matched: true };
++    return { key: "", matched: false };
++  }
++
++  function resolveChart(text, lang) {
++    var dict = CHART_SYN[lang] || CHART_SYN.en;
++    var keys = Object.keys(dict);
++    for (var i = 0; i < keys.length; i++) {
++      var words = dict[keys[i]].slice().sort(function (a, b) { return b.length - a.length; });
++      for (var j = 0; j < words.length; j++) if (matchWord(text, words[j])) return { key: keys[i], matched: true };
++    }
++    return { key: "", matched: false };
++  }
++
++  function resolvePeriod(text, refToday) {
++    var ref = refToday || todayStr();
++    var m = text.match(/(?:last|ultimos?|últimos?)\s*(\d+)\s*(?:months?|mes(?:es)?)/);
++    if (m) return { period: "custom", from: addMonthsStr(ref, -parseInt(m[1], 10)), to: ref, matched: true };
++    m = text.match(/(?:last|ultimos?|últimos?)\s*(\d+)\s*(?:days?|dias?|días?)/);
++    if (m) return { period: "custom", from: addDaysStr(ref, -parseInt(m[1], 10)), to: ref, matched: true };
++    if (matchAny(text, ["last week", "semana pasada", "la semana pasada"])) return { period: "custom", from: addDaysStr(ref, -7), to: addDaysStr(ref, -1), matched: true };
++    if (matchAny(text, ["last month", "mes pasado", "el mes pasado"])) { var ms = ref.slice(0, 8) + "01"; return { period: "custom", from: addMonthsStr(ms, -1), to: addDaysStr(ms, -1), matched: true }; }
++    if (matchAny(text, ["this week", "esta semana"])) return { period: "weekly", from: "", to: "", matched: true };
++    if (matchAny(text, ["this month", "este mes"])) return { period: "monthly", from: "", to: "", matched: true };
++    if (matchAny(text, ["this year", "este ano", "este año"])) return { period: "custom", from: ref.slice(0, 4) + "-01-01", to: ref, matched: true };
++    if (matchAny(text, ["today", "hoy"])) return { period: "custom", from: ref, to: ref, matched: true };
++    return { period: "monthly", from: "", to: "", matched: false };
++  }
++
++  function resolveFilters(text, lang, staffMatched) {
++    var out = { staff: "", gender: "", payment: "", matched: false };
++    if (staffMatched.length === 1) { out.staff = staffMatched[0].id; out.matched = true; }
++    var gw = GENDER_WORDS[lang] || GENDER_WORDS.en;
++    if (matchAny(text, gw.women)) { out.gender = "women"; out.matched = true; }
++    else if (matchAny(text, gw.men)) { out.gender = "men"; out.matched = true; }
++    var pw = PAYMENT_WORDS[lang] || PAYMENT_WORDS.en;
++    Object.keys(pw).forEach(function (k) {
++      if (matchAny(text, pw[k])) { out.payment = k; out.matched = true; }
++    });
++    return out;
++  }
++
++  function resolveCompare(text, lang, staffMatched) {
++    if (matchAny(text, ["new vs returning", "returning vs new", "new and returning", "nuevos vs recurrentes", "recurrentes vs nuevos"])) return { key: "new_ret", matched: true };
++    if (matchAny(text, ["by group", "by category", "por grupo", "por categoria"])) return { key: "group", matched: true };
++    if (staffMatched.length >= 2 && matchAny(text, [" vs ", " versus ", "compared to", "compared with", "en comparacion", "comparado con"])) return { key: "staff", matched: true };
++    if (staffMatched.length >= 2) return { key: "staff", matched: true };
++    return { key: "", matched: false };
++  }
++
++  function resolveLimit(text) {
++    var m = text.match(/(?:top|mejores|principales)\s*(\d+)/);
++    if (m) return { limit: Math.max(1, Math.min(50, parseInt(m[1], 10))), matched: true };
++    return { limit: 10, matched: false };
++  }
++
++  function i18n(D, lang, key) {
++    return (D.i18n[lang] && D.i18n[lang][key]) || (D.i18n.en && D.i18n.en[key]) || key;
++  }
++
++  function buildSummary(D, lang, q, meta) {
++    var metricLabel = i18n(D, lang, "metric_" + q.metric);
++    var dimLabel = i18n(D, lang, "dim_" + q.dimension);
++    var periodLabel;
++    if (q.period === "custom") {
++      var fromTo = D.i18n[lang] && D.i18n[lang].nl_from_to;
++      periodLabel = fromTo ? fromTo.replace("{from}", q.from).replace("{to}", q.to) : (q.from + " → " + q.to);
++    } else {
++      periodLabel = i18n(D, lang, q.period);
++    }
++    var parts = [metricLabel, dimLabel, periodLabel];
++    if (q.compare === "staff" && meta.staffNames && meta.staffNames.length >= 2) parts.push(meta.staffNames.join(" & "));
++    if (q.staff && meta.staffNames && meta.staffNames.length) parts.push(meta.staffNames[0]);
++    if (q.gender) parts.push(i18n(D, lang, q.gender === "women" ? "womens" : "mens"));
++    if (q.payment) parts.push(i18n(D, lang, q.payment));
++    if (q.compare === "new_ret") parts.push(i18n(D, lang, "compare_new_ret"));
++    return parts.join(" · ");
++  }
++
++  function parse(text, D, lang) {
++    lang = lang === "es" ? "es" : "en";
++    var t = norm(text);
++    if (!t) return { type: "unknown" };
++    var refToday = (D.meta && D.meta.today) || todayStr();
++
++    var staffMatched = entityMatches(t, D.staff || [], ["name"]);
++    var svcMatched = entityMatches(t, Object.keys(D.services || {}).map(function (k) { return { id: k, name: D.services[k].name_en, nameEs: D.services[k].name_es }; }), lang === "es" ? ["nameEs"] : ["name"]);
++    var prodMatched = entityMatches(t, Object.keys(D.products || {}).map(function (k) { return { id: k, name: D.products[k].name_en, nameEs: D.products[k].name_es }; }), lang === "es" ? ["nameEs"] : ["name"]);
++
++    var metric = resolveMetric(t, lang);
++    var dimension = resolveDimension(t, lang);
++    var dimKey = dimension.key;
++    if (!dimKey) {
++      if (svcMatched.length) dimKey = "service";
++      else if (prodMatched.length) dimKey = "product";
++      else if (staffMatched.length === 1) dimKey = "day";
++      else dimKey = "day";
++    }
++    if (dimKey === "day" && (svcMatched.length || prodMatched.length)) dimKey = svcMatched.length ? "service" : "product";
++
++    var period = resolvePeriod(t, refToday);
++    var chart = resolveChart(t, lang);
++    var filters = resolveFilters(t, lang, staffMatched);
++    var compare = resolveCompare(t, lang, staffMatched);
++    var limit = resolveLimit(t);
++
++    var signals = metric.matched || dimension.matched || period.matched || chart.matched || compare.matched ||
++      staffMatched.length > 0 || svcMatched.length > 0 || prodMatched.length > 0 || filters.matched || limit.matched;
++    if (!signals) return { type: "unknown" };
++
++    if (compare.key === "staff") filters.staff = "";
++
++    var q = {
++      metric: metric.key,
++      dimension: dimKey,
++      compare: compare.key,
++      chart: chart.key || "auto",
++      period: period.period,
++      staff: filters.staff,
++      gender: filters.gender,
++      payment: filters.payment,
++      limit: limit.limit,
++      from: period.from,
++      to: period.to
++    };
++
++    var meta = { staffNames: staffMatched.map(function (s) { return s.name; }) };
++    return { type: "query", q: q, summary: buildSummary(D, lang, q, meta) };
++  }
++
++  function speechSupported() {
++    try {
++      return !!(global.SpeechRecognition || global.webkitSpeechRecognition);
++    } catch (e) { return false; }
++  }
++
++  function recognize(lang, onResult, onEnd, onError) {
++    var SR = global.SpeechRecognition || global.webkitSpeechRecognition;
++    if (!SR) return null;
++    var rec = new SR();
++    rec.lang = lang === "es" ? "es-AR" : "en-US";
++    rec.interimResults = false;
++    rec.maxAlternatives = 1;
++    rec.onresult = function (ev) {
++      var txt = "";
++      for (var i = 0; i < ev.results.length; i++) {
++        var alt = ev.results[i];
++        if (alt && alt[0] && alt[0].transcript) txt += alt[0].transcript;
++      }
++      onResult(txt.trim());
++    };
++    if (onEnd) rec.onend = onEnd;
++    if (onError) rec.onerror = onError;
++    rec.start();
++    return rec;
++  }
++
++  global.NaturalQuery = { parse: parse, speechSupported: speechSupported, recognize: recognize };
++})(typeof window !== "undefined" ? window : (typeof globalThis !== "undefined" ? globalThis : global));
+diff --git a/Lumiere-pos/dashboard/styles.css b/Lumiere-pos/dashboard/styles.css
+index d6e2cb4..a840e3a 100644
+--- a/Lumiere-pos/dashboard/styles.css
++++ b/Lumiere-pos/dashboard/styles.css
+@@ -463,6 +463,88 @@ input:focus, select:focus { outline: none; border-color: var(--gold); box-shadow
+ .btn.danger:hover { background: rgba(242, 96, 107, 0.12); box-shadow: 0 0 14px rgba(242, 96, 107, 0.2); }
+ .btn.sm { padding: 6px 9px; border-radius: 8px; line-height: 1; }
+ .btn.sm svg { vertical-align: -2px; }
++.btn.ok {
++  background: transparent;
++  color: var(--ok);
++  border: 1px solid rgba(61, 220, 151, 0.5);
++  box-shadow: none;
++}
++.btn.ok:hover { background: rgba(61, 220, 151, 0.12); box-shadow: 0 0 14px rgba(61, 220, 151, 0.2); }
++.btn.warn {
++  background: transparent;
++  color: var(--warn);
++  border: 1px solid rgba(242, 163, 60, 0.5);
++  box-shadow: none;
++}
++.btn.warn:hover { background: rgba(242, 163, 60, 0.12); box-shadow: 0 0 14px rgba(242, 163, 60, 0.2); }
++
++.appt-summary {
++  padding: 12px 16px;
++  color: var(--text-dim);
++  font-size: 13px;
++  border-top: 1px solid var(--border);
++}
++
++.reorder-panel { margin-bottom: 16px; }
++.reorder-row {
++  display: flex;
++  align-items: center;
++  gap: 12px;
++  padding: 9px 0;
++  border-bottom: 1px solid var(--border);
++}
++.reorder-row:last-child { border-bottom: none; }
++.reorder-name { flex: 1; font-weight: 600; }
++
++.toast-wrap {
++  position: fixed;
++  bottom: 20px;
++  right: 20px;
++  z-index: 2000;
++  display: flex;
++  flex-direction: column;
++  gap: 8px;
++  pointer-events: none;
++}
++.toast {
++  background: rgba(22, 22, 14, 0.95);
++  border: 1px solid var(--border-strong);
++  border-left: 3px solid var(--gold-soft);
++  color: var(--text);
++  padding: 11px 16px;
++  border-radius: var(--radius-sm);
++  font-size: 13.5px;
++  font-weight: 600;
++  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
++  opacity: 0;
++  transform: translateY(8px);
++  transition: opacity 0.2s, transform 0.2s;
++  max-width: 320px;
++}
++.toast.show { opacity: 1; transform: translateY(0); }
++
++.nl-suggestions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
++.chip {
++  background: var(--surface2);
++  border: 1px solid var(--border);
++  color: var(--text-dim);
++  border-radius: 999px;
++  padding: 6px 12px;
++  font-size: 12.5px;
++  cursor: pointer;
++  transition: border-color 0.15s, color 0.15s;
++}
++.chip:hover { border-color: var(--gold-soft); color: var(--gold-soft); }
++.nl-confirm {
++  margin-top: 12px;
++  padding: 8px 12px;
++  border-radius: var(--radius-sm);
++  background: rgba(55, 200, 168, 0.12);
++  border: 1px solid rgba(55, 200, 168, 0.35);
++  color: var(--teal-soft);
++  font-size: 13px;
++  font-weight: 600;
++}
+ 
+ .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+ .form-field label {
+diff --git a/Lumiere-pos/dashboard/sw.js b/Lumiere-pos/dashboard/sw.js
+new file mode 100644
+index 0000000..1b7a55c
+--- /dev/null
++++ b/Lumiere-pos/dashboard/sw.js
+@@ -0,0 +1,55 @@
++var CACHE = "lumiere-pos-v1";
++var ASSETS = ["./index.html", "./app.js", "./data.js", "./styles.css", "./manifest.json", "./icon.svg"];
++
++self.addEventListener("install", function (e) {
++  e.waitUntil(
++    caches.open(CACHE)
++      .then(function (c) { return c.addAll(ASSETS); })
++      .then(function () { return self.skipWaiting(); })
++  );
++});
++
++self.addEventListener("activate", function (e) {
++  e.waitUntil(
++    caches.keys()
++      .then(function (keys) {
++        return Promise.all(
++          keys.filter(function (k) { return k !== CACHE; })
++            .map(function (k) { return caches.delete(k); })
++        );
++      })
++      .then(function () { return self.clients.claim(); })
++  );
++});
++
++self.addEventListener("fetch", function (e) {
++  var url;
++  try { url = new URL(e.request.url); } catch (err) { return; }
++  if (url.origin !== location.origin) return;
++  if (e.request.method !== "GET") return;
++
++  if (e.request.mode === "navigate") {
++    e.respondWith(
++      fetch(e.request)
++        .then(function (res) {
++          var copy = res.clone();
++          caches.open(CACHE).then(function (c) { c.put("./index.html", copy); });
++          return res;
++        })
++        .catch(function () { return caches.match("./index.html"); })
++    );
++    return;
++  }
++
++  e.respondWith(
++    caches.match(e.request).then(function (hit) {
++      return hit || fetch(e.request).then(function (res) {
++        if (res.ok) {
++          var copy = res.clone();
++          caches.open(CACHE).then(function (c) { c.put(e.request, copy); });
++        }
++        return res;
++      });
++    })
++  );
++});

@@ -1,0 +1,19 @@
+{
+  "name": "Lumiere POS Dashboard",
+  "short_name": "Lumiere POS",
+  "description": "Point-of-sale dashboard for a beauty salon: sales, clients, staff, commissions and analytics.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0e0e11",
+  "theme_color": "#0e0e11",
+  "lang": "en",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

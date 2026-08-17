@@ -12,8 +12,10 @@
   var analyticsQueries = null;
   var analyticsDraft = null;
   var lastQueryResult = null;
+  var nlText = "";
   var editTarget = null;
   var searchQ = "";
+  var apptViewDate = "";
   var checkout = { client: "", stylist: "", assistant: "", lines: [], payments: {} };
 
   try { lang = localStorage.getItem("lumiere_lang") || "en"; } catch (e) {}
@@ -22,7 +24,7 @@
   var D = loadData();
   var state = { today: D.meta.today, weekStart: D.meta.weekStart, weekEnd: D.meta.weekEnd };
 
-  var OWNER_SECTIONS = ["week", "month", "commission", "reports", "analytics", "rules"];
+  var OWNER_SECTIONS = ["week", "month", "commission", "reports", "analytics", "rules", "data", "care"];
   var PUBLIC_SECTIONS = ["today", "appointments", "checkout", "clients", "staff", "services", "products", "sales"];
 
   function isObj(x) { return x && typeof x === "object" && !Array.isArray(x); }
@@ -50,7 +52,12 @@
   }
 
   function canSee(s) {
-    if (role === "receptionist") return PUBLIC_SECTIONS.indexOf(s) > -1;
+    if (role === "receptionist") {
+      if (s === "today") return true;
+      var allowed = D.settings.receptionistSections;
+      if (allowed) return allowed.indexOf(s) > -1;
+      return PUBLIC_SECTIONS.indexOf(s) > -1;
+    }
     return true;
   }
   function canEdit() { return role === "owner" || role === "admin"; }
@@ -131,7 +138,7 @@
 
   function statusBadge(status) {
     var map = {
-      booked: "gold", done: "ok", "no-show": "danger", paid: "ok",
+      booked: "gold", done: "ok", "no-show": "danger", cancelled: "dim", paid: "ok",
       pending: "warn", active: "ok", archived: "dim", briefed: "warn",
       approved: "ok", morning: "gold", afternoon: "warn"
     };
@@ -415,6 +422,30 @@
     return isNaN(v) ? (fallback || 0) : v;
   }
 
+  function toast(msg) {
+    try {
+      if (typeof document === "undefined" || !document.body) return;
+      var wrap = document.getElementById("toastWrap");
+      if (!wrap) {
+        wrap = document.createElement("div");
+        wrap.id = "toastWrap";
+        wrap.className = "toast-wrap";
+        document.body.appendChild(wrap);
+      }
+      var el = document.createElement("div");
+      el.className = "toast";
+      el.textContent = msg;
+      wrap.appendChild(el);
+      if (el.classList) { el.classList.add("show"); }
+      setTimeout(function () { if (el.classList) el.classList.remove("show"); if (el.remove) el.remove(); }, 2600);
+    } catch (e) {}
+  }
+
+  function confirmDelete(label) {
+    try { return confirm(t("delete_confirm") + "\n" + (label || "")); }
+    catch (e) { return true; }
+  }
+
   function renderClientForm() {
     var c = editTarget.id ? clientById(editTarget.id) : null;
     var mode = editTarget.mode;
@@ -497,6 +528,20 @@
       html += '<div class="card">' + donutChart(donutParts) + '</div>';
     } else {
       html += '<div class="card"><h3>' + t("pending") + '</h3></div>';
+    }
+
+    var todayApps = D.appointments.filter(function (a) { return a.date === state.today && a.status === "booked"; })
+      .sort(function (a, b) { return a.time < b.time ? -1 : 1; });
+    if (todayApps.length) {
+      var apptRows = [[t("time"), t("client"), t("services"), t("staff")]];
+      todayApps.forEach(function (a) {
+        apptRows.push([a.time,
+          esc((clientById(a.client) || {}).name || a.client),
+          svcName(a.service),
+          esc((staffById(a.stylist) || {}).name || a.stylist)]);
+      });
+      html += sectionTitle("🕐 " + t("today_schedule"));
+      html += table(apptRows, { numCols: [0] });
     }
 
     html += sectionTitle("🏆 " + t("top_clients"));
@@ -650,31 +695,79 @@
     return rows;
   }
 
+  function appointmentById(id) { return D.appointments.find(function (a) { return a.id === id; }); }
+
+  function renderAppointmentForm() {
+    var a = editTarget.id ? appointmentById(editTarget.id) : null;
+    var title = editTarget.mode === "edit"
+      ? t("edit") + " — " + esc((a && clientById(a.client) ? clientById(a.client).name : "") + " · " + (a ? a.time : ""))
+      : t("new_appointment");
+    var body =
+      field(t("appt_date"), '<input id="apDate" type="date" value="' + esc(a ? a.date : (apptViewDate || state.today)) + '">') +
+      field(t("time"), '<input id="apTime" type="time" value="' + esc(a ? a.time : "") + '">') +
+      field(t("client"), '<select id="apClient">' + D.clients.map(function (c) {
+        return '<option value="' + c.id + '"' + (a && a.client === c.id ? " selected" : "") + '>' + esc(c.name) + '</option>';
+      }).join("") + '</select>') +
+      field(t("services"), '<select id="apSvc">' + Object.keys(D.services).map(function (k) {
+        return '<option value="' + k + '"' + (a && a.service === k ? " selected" : "") + '>' + esc(svcName(k)) + '</option>';
+      }).join("") + '</select>') +
+      field(t("staff"), '<select id="apStylist">' + D.staff.filter(function (s) { return s.role === "stylist" && s.status !== "archived"; }).map(function (s) {
+        return '<option value="' + s.id + '"' + (a && a.stylist === s.id ? " selected" : "") + '>' + esc(s.name) + '</option>';
+      }).join("") + '</select>') +
+      (editTarget.mode === "edit" ? field(t("status"), '<select id="apStatus"><option value="booked"' + (a && a.status === "booked" ? " selected" : "") + '>' + t("booked") + '</option><option value="done"' + (a && a.status === "done" ? " selected" : "") + '>' + t("done") + '</option><option value="no-show"' + (a && a.status === "no-show" ? " selected" : "") + '>' + t("appt_status_noshow") + '</option><option value="cancelled"' + (a && a.status === "cancelled" ? " selected" : "") + '>' + t("appt_status_cancelled") + '</option></select>') : "");
+    var actions =
+      '<button class="btn" onclick="Lumiere.saveAppointment()">' + t("save") + '</button>' +
+      '<button class="btn ghost" onclick="Lumiere.cancelForm()">' + t("cancel") + '</button>';
+    return formCard(title, '<div class="form-row">' + body + '</div>' +
+      '<span id="apMsg" class="muted" style="margin-top:8px;display:block"></span>', actions);
+  }
+
   function renderAppointments() {
+    var date = apptViewDate || state.today;
     var html = '<div class="toolbar">' +
       '<h2>🕐 ' + t("sec_appointments") + '</h2>' +
       '<span class="spacer"></span>' +
-      '<input type="date" id="apptDate" value="' + state.today + '" style="width:160px">' +
-      '<button class="btn" onclick="Lumiere.newAppointment()">' + icon("plus", 14) + ' ' + t("new_appointment") + '</button>' +
+      '<input type="date" id="apptDate" value="' + date + '" style="width:160px">' +
+      '<button class="btn" onclick="Lumiere.startAppointmentForm()">' + icon("plus", 14) + ' ' + t("new_appointment") + '</button>' +
       '</div>';
 
-    var apps = D.appointments.filter(function (a) { return a.date >= state.today; })
-      .sort(function (a, b) { return (a.date + a.time) < (b.date + b.time) ? -1 : 1; });
+    if (editTarget && editTarget.kind === "appointment") html += renderAppointmentForm();
+
+    var apps = D.appointments.filter(function (a) { return a.date === date; })
+      .sort(function (a, b) { return a.time < b.time ? -1 : 1; });
 
     if (!apps.length) return html + '<div class="card"><h3>' + t("pending") + '</h3></div>';
 
     html += '<div class="card"><div class="appointment-row" style="color:var(--text-dim);font-weight:600;text-transform:uppercase;font-size:12px">' +
-      '<div>' + t("time") + '</div><div>' + t("client") + '</div><div>' + t("services") + '</div><div>' + t("staff") + '</div><div>' + t("status") + '</div></div>';
+      '<div>' + t("time") + '</div><div>' + t("client") + '</div><div>' + t("services") + '</div><div>' + t("staff") + '</div><div>' + t("status") + '</div><div></div></div>';
 
+    var counts = { booked: 0, done: 0, "no-show": 0, cancelled: 0 };
     apps.forEach(function (a) {
+      if (counts[a.status] !== undefined) counts[a.status]++;
       var c = clientById(a.client), s = staffById(a.stylist);
+      var actions = "";
+      if (a.status === "booked") {
+        actions += '<button class="btn ok sm" title="' + esc(t("done")) + '" onclick="Lumiere.setAppointmentStatus(\'' + a.id + '\',\'done\')">✓</button> ' +
+          '<button class="btn warn sm" title="' + esc(t("appt_status_noshow")) + '" onclick="Lumiere.setAppointmentStatus(\'' + a.id + '\',\'no-show\')">✕</button>';
+      }
+      actions += ' <button class="btn ghost sm" title="' + esc(t("edit")) + '" onclick="Lumiere.startAppointmentForm(\'edit\',\'' + a.id + '\')">' + icon("edit", 13) + '</button>';
+      if (a.status !== "cancelled") {
+        actions += ' <button class="btn danger sm" title="' + esc(t("appt_status_cancelled")) + '" onclick="Lumiere.cancelAppointment(\'' + a.id + '\')">✖</button>';
+      }
       html += '<div class="appointment-row">' +
-        '<div class="time">' + esc(a.date.slice(5) + " · " + a.time) + '</div>' +
+        '<div class="time">' + esc(a.time) + '</div>' +
         '<div>' + esc(c ? c.name : a.client) + '</div>' +
         '<div>' + svcName(a.service) + '</div>' +
         '<div>' + esc(s ? s.name : a.stylist) + '</div>' +
-        '<div>' + statusBadge(a.status) + '</div></div>';
+        '<div>' + statusBadge(a.status) + '</div>' +
+        '<div style="display:flex;gap:6px">' + actions + '</div></div>';
     });
+
+    html += '<div class="appt-summary">' + t("appt_total") + ' ' + apps.length +
+      ' · ' + t("booked") + ' ' + counts.booked +
+      ' · ' + t("done") + ' ' + counts.done +
+      ' · ' + t("appt_status_noshow") + ' ' + counts["no-show"] +
+      ' · ' + t("appt_status_cancelled") + ' ' + counts.cancelled + '</div>';
     return html + '</div>';
   }
 
@@ -785,6 +878,7 @@
     checkout = { client: "", stylist: "", assistant: "", lines: [], payments: {} };
     save();
     msg.textContent = t("saved");
+    toast(t("saved"));
     sec = "sales";
     render();
   }
@@ -793,6 +887,7 @@
     var html = '<div class="toolbar"><h2>👥 ' + t("sec_clients") + '</h2>' +
       '<span class="spacer"></span>' +
       '<div class="search-box">' + icon("search", 14) + '<input id="clientSearch" type="text" placeholder="' + esc(t("client_search_ph")) + '" oninput="Lumiere.filterClients(this.value)"></div>' +
+      '<button class="btn ghost" onclick="Lumiere.exportClientsCSV()">⬇ ' + t("data_export_clients") + '</button>' +
       '<button class="btn" onclick="Lumiere.startClientForm()">' + icon("plus", 14) + ' ' + t("add_client") + '</button></div>';
 
     if (editTarget && editTarget.kind === "client") html += renderClientForm();
@@ -817,7 +912,7 @@
     if (canEdit()) {
       html += '<button class="btn" onclick="Lumiere.startStaffForm()">' + icon("plus", 14) + ' ' + t("add_staff") + '</button>';
     }
-    html += '</div>';
+    html += '<button class="btn ghost" onclick="Lumiere.exportStaffCSV()">⬇ ' + t("data_export_staff") + '</button></div>';
 
     if (editTarget && editTarget.kind === "staff") html += renderStaffForm();
 
@@ -853,8 +948,20 @@
     return html + table(rows, { numCols: [3] });
   }
 
+  function lowStockItems() {
+    var out = [];
+    Object.keys(D.products).forEach(function (k) {
+      var p = D.products[k];
+      if (p.stock <= p.reorder) out.push([k, p]);
+    });
+    return out.sort(function (a, b) { return (a[1].stock - a[1].reorder) - (b[1].stock - b[1].reorder); });
+  }
+
   function renderProducts() {
+    var low = lowStockItems();
     var html = '<div class="toolbar"><h2>🧴 ' + t("sec_products") + '</h2><span class="spacer"></span>';
+    if (low.length) html += '<span class="badge danger" style="margin-right:8px">⚠ ' + t("low") + ' ' + low.length + '</span>';
+    html += '<button class="btn ghost" onclick="Lumiere.exportProductsCSV()">⬇ ' + t("data_export_products") + '</button>';
     if (canEdit()) {
       html += '<button class="btn" onclick="Lumiere.startProductForm()">' + icon("plus", 14) + ' ' + t("btn_new_product") + '</button>';
     }
@@ -862,15 +969,30 @@
 
     if (editTarget && editTarget.kind === "product") html += renderProductForm();
 
+    if (low.length) {
+      html += '<div class="card reorder-panel"><h3>📦 ' + t("reorder_list") + ' (' + low.length + ')</h3>';
+      low.forEach(function (it) {
+        var k = it[0], p = it[1];
+        html += '<div class="reorder-row">' +
+          '<span class="reorder-name">' + esc(prodName(k)) + '</span>' +
+          '<span class="muted">' + t("stock") + ': ' + p.stock + ' · ' + t("reorder") + ': ' + p.reorder + '</span>' +
+          (canEdit() ? '<button class="btn ghost sm" onclick="Lumiere.restockProduct(\'' + k + '\')">' + icon("plus", 13) + ' ' + t("restock") + '</button>' : '') +
+          '</div>';
+      });
+      html += '</div>';
+    }
+
     var rows = [["", t("name"), t("price"), t("stock"), t("reorder"), t("status"), ""]];
     Object.keys(D.products).forEach(function (k) {
       var p = D.products[k];
-      var low = p.stock <= p.reorder;
-      var actions = canEdit()
-        ? '<button class="btn ghost sm" onclick="Lumiere.startProductForm(\'edit\',\'' + k + '\')">' + icon("edit", 13) + '</button> ' +
-          '<button class="btn danger sm" onclick="Lumiere.deleteProduct(\'' + k + '\')">' + icon("trash", 13) + '</button>'
-        : "";
-      rows.push([k, prodName(k), ars(p.price_ars), p.stock, p.reorder, low ? '<span class="badge danger">' + t("low") + '</span>' : '<span class="badge ok">' + t("ok") + '</span>', actions]);
+      var lowRow = p.stock <= p.reorder;
+      var actions = "";
+      if (canEdit()) {
+        actions += '<button class="btn ghost sm" onclick="Lumiere.startProductForm(\'edit\',\'' + k + '\')">' + icon("edit", 13) + '</button> ';
+        if (lowRow) actions += '<button class="btn warn sm" title="' + esc(t("restock")) + '" onclick="Lumiere.restockProduct(\'' + k + '\')">+</button> ';
+        actions += '<button class="btn danger sm" onclick="Lumiere.deleteProduct(\'' + k + '\')">' + icon("trash", 13) + '</button>';
+      }
+      rows.push([k, prodName(k), ars(p.price_ars), p.stock, p.reorder, lowRow ? '<span class="badge danger">' + t("low") + '</span>' : '<span class="badge ok">' + t("ok") + '</span>', actions]);
     });
     return html + table(rows, { numCols: [1, 2, 3] });
   }
@@ -902,6 +1024,96 @@
     html += table(rows);
     html += '<button class="btn" style="margin-top:14px" onclick="Lumiere.saveRates()">' + t("save") + '</button>';
     html += '<p class="muted" style="margin-top:14px">' + t("commission_owner_note") + '</p>';
+    return html;
+  }
+
+  function clientLastVisit(c) {
+    var v = (c.visits || []).slice().sort();
+    return v.length ? v[v.length - 1] : (c.first_visit || "");
+  }
+
+  function renderCare() {
+    var html = '<div class="toolbar"><h2>💖 ' + t("sec_care") + '</h2></div>';
+    html += '<p class="muted" style="margin-bottom:16px">' + t("care_note") + '</p>';
+
+    var dueDays = 30;
+    var due = D.clients.filter(function (c) {
+      var last = clientLastVisit(c);
+      return !!last && daysBetween(last, state.today) > dueDays;
+    }).sort(function (a, b) {
+      return daysBetween(clientLastVisit(b), state.today) - daysBetween(clientLastVisit(a), state.today);
+    });
+
+    html += sectionTitle("⏰ " + t("care_due_title") + " (> " + dueDays + "d)");
+    if (due.length) {
+      var dueRows = [[t("client"), t("care_last_visit"), t("care_days_since"), t("visits")]];
+      due.forEach(function (c) {
+        var last = clientLastVisit(c);
+        dueRows.push([esc(c.name), last, daysBetween(last, state.today), (c.visits || []).length]);
+      });
+      html += table(dueRows, { numCols: [2, 3] });
+    } else {
+      html += '<div class="card"><h3>' + t("care_none_due") + '</h3></div>';
+    }
+
+    var ns = {};
+    D.appointments.forEach(function (a) {
+      if (a.status === "no-show") ns[a.client] = (ns[a.client] || 0) + 1;
+    });
+    var nsArr = Object.keys(ns).map(function (k) { return { id: k, n: ns[k] }; }).sort(function (a, b) { return b.n - a.n; });
+
+    html += sectionTitle("🚫 " + t("care_noshow_title"));
+    if (nsArr.length) {
+      var nsRows = [[t("client"), t("care_noshows")]];
+      nsArr.forEach(function (x) {
+        var c = clientById(x.id);
+        nsRows.push([esc(c ? c.name : x.id), x.n]);
+      });
+      html += table(nsRows, { numCols: [1] });
+    } else {
+      html += '<div class="card"><h3>' + t("care_none_noshow") + '</h3></div>';
+    }
+
+    var byC = groupBy(D.tickets, function (t) { return t.client; });
+    var spend = Object.keys(byC).map(function (k) {
+      var c = clientById(k);
+      return { id: k, name: c ? c.name : k, spend: sum(byC[k].map(ticketTotal)), visits: c ? (c.visits || []).length : byC[k].length };
+    }).sort(function (a, b) { return b.spend - a.spend; }).slice(0, 6);
+
+    html += sectionTitle("👑 " + t("care_vip_title"));
+    var vipRows = [["#", t("client"), t("visits"), t("total") + " ARS"]];
+    spend.forEach(function (s, i) {
+      vipRows.push(["#" + (i + 1), esc(s.name), s.visits, ars(s.spend)]);
+    });
+    html += table(vipRows, { numCols: [2, 3] });
+
+    return html;
+  }
+
+  function renderData() {
+    var html = '<div class="toolbar"><h2>🗄️ ' + t("sec_data") + '</h2></div>';
+    html += '<p class="muted" style="margin-bottom:16px">' + t("data_note") + '</p>';
+
+    html += '<div class="grid cols-2">';
+
+    html += '<div class="card"><h3>💾 ' + t("data_backup") + '</h3>';
+    html += '<p class="muted">' + t("data_backup_desc") + '</p>';
+    html += '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+      '<button class="btn" onclick="Lumiere.exportBackup()">⬇ ' + t("data_backup") + ' (.json)</button>' +
+      '<button class="btn ghost" onclick="Lumiere.exportMarkdown()">📄 ' + t("data_export_md") + '</button></div></div>';
+
+    html += '<div class="card"><h3>📥 ' + t("data_restore") + '</h3>';
+    html += '<p class="muted">' + t("data_import_hint") + '</p>';
+    html += '<div class="form-row" style="grid-template-columns:1fr auto;align-items:end">' +
+      '<input type="file" id="dataImport" accept="application/json,.json">' +
+      '<button class="btn" onclick="Lumiere.importBackup()">' + t("data_restore") + '</button></div>' +
+      '<span id="dataMsg" class="muted" style="display:block;margin-top:8px"></span></div>';
+
+    html += '<div class="card"><h3>🔄 ' + t("data_reset") + '</h3>';
+    html += '<p class="muted">' + t("data_reset_desc") + '</p>';
+    html += '<button class="btn danger" onclick="Lumiere.resetData()">' + t("data_reset") + '</button></div>';
+
+    html += '</div>';
     return html;
   }
 
@@ -953,7 +1165,11 @@
     returning: { money: false },
     new_clients: { money: false },
     product_qty: { money: false },
-    commission: { money: true }
+    commission: { money: true },
+    services_rev: { money: true },
+    products_rev: { money: true },
+    returning_rate: { money: false },
+    avg_frequency: { money: false }
   };
 
   var WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
@@ -964,6 +1180,12 @@
     var sv = sum(ticketServices(t).map(lineTotal));
     var pr = sum(ticketProducts(t).map(lineTotal));
     return Math.round(sv * r.service / 100 + pr * r.product / 100 + sv * a.service / 100 + pr * a.product / 100);
+  }
+
+  function distinctClients(tickets) {
+    var seen = {};
+    tickets.forEach(function (t) { seen[t.client] = true; });
+    return Object.keys(seen).length;
   }
 
   function metricValue(metric, tickets, from, to) {
@@ -978,6 +1200,14 @@
         return tickets.filter(function (t) { var c = clientById(t.client); return !!(c && c.first_visit === t.date); }).length;
       case "product_qty": return sum(tickets.map(function (t) { return sum(ticketProducts(t).map(function (l) { return l.q; })); }));
       case "commission": return sum(tickets.map(ticketCommission));
+      case "services_rev": return sum(tickets.map(function (t) { return sum(ticketServices(t).map(lineTotal)); }));
+      case "products_rev": return sum(tickets.map(function (t) { return sum(ticketProducts(t).map(lineTotal)); }));
+      case "returning_rate":
+        return tickets.length ? Math.round(tickets.filter(isReturning).length / tickets.length * 100) : 0;
+      case "avg_frequency": {
+        var dc = distinctClients(tickets);
+        return dc ? Math.round(tickets.length / dc * 10) / 10 : 0;
+      }
     }
     return 0;
   }
@@ -1137,8 +1367,12 @@
       ["visits", "🧾 " + t("metric_visits")],
       ["avg_ticket", "🎟️ " + t("metric_avg_ticket")],
       ["returning", "🔁 " + t("metric_returning")],
+      ["returning_rate", "🔁 " + t("metric_returning_rate") + " %"],
       ["new_clients", "🆕 " + t("metric_new_clients")],
+      ["avg_frequency", "👥 " + t("metric_avg_frequency")],
       ["product_qty", "🧴 " + t("metric_product_qty")],
+      ["services_rev", "✂️ " + t("metric_services_rev")],
+      ["products_rev", "🧴 " + t("metric_products_rev")],
       ["commission", "💵 " + t("metric_commission")]
     ];
   }
@@ -1187,6 +1421,40 @@
     return field(label, '<select id="' + id + '"' + (onchange ? ' onchange="Lumiere.' + onchange + '"' : "") + '>' + options.map(function (op) {
       return '<option value="' + op[0] + '"' + (val === op[0] ? " selected" : "") + '>' + esc(op[1]) + '</option>';
     }).join("") + '</select>');
+  }
+
+  function nlSuggestList() {
+    return lang === "es" ? [
+      "Ingresos por servicio este mes",
+      "Visitas por equipo esta semana",
+      "Ticket promedio por día últimos 30 días",
+      "Comisiones por equipo este mes",
+      "Ingresos por método de pago este mes",
+      "Clientes nuevos este mes"
+    ] : [
+      "Revenue by service this month",
+      "Visits by staff this week",
+      "Average ticket by day last 30 days",
+      "Commission by staff this month",
+      "Revenue by payment method this month",
+      "New clients this month"
+    ];
+  }
+
+  function renderNLBox() {
+    var mic = NaturalQuery.speechSupported()
+      ? '<div class="form-field" style="align-self:end"><button class="btn ghost" id="nlMic" onclick="Lumiere.startVoice()">🎤 ' + t("nl_mic") + '</button></div>'
+      : "";
+    return '<div class="card nl-card"><h3>🎙 ' + t("nl_title") + '</h3>' +
+      '<div class="form-row" style="grid-template-columns:1fr auto auto;align-items:end">' +
+      '<div class="form-field full"><input id="nlInput" placeholder="' + esc(t("nl_placeholder")) + '" value="' + esc(nlText) + '" onkeydown="if(event.key===\'Enter\')Lumiere.runNaturalQuery()"></div>' +
+      '<div class="form-field" style="align-self:end"><button class="btn" onclick="Lumiere.runNaturalQuery()">⚡ ' + t("nl_run") + '</button></div>' +
+      mic +
+      '</div>' +
+      '<div class="nl-suggestions">' + nlSuggestList().map(function (x, i) {
+        return '<button class="chip" onclick="Lumiere.askNatural(' + i + ')">' + esc(x) + '</button>';
+      }).join("") + '</div>' +
+      '<div id="nlMsg"></div></div>';
   }
 
   function renderBuilder() {
@@ -1293,7 +1561,11 @@
 
   function renderQueryResult(q) {
     var isMoney = METRICS[q.metric] && METRICS[q.metric].money;
-    var fv = function (v) { return isMoney ? ars(v) : fmt(v); };
+    var fv = function (v) {
+      if (isMoney) return ars(v);
+      if (q.metric === "avg_frequency") return String(v);
+      return fmt(v);
+    };
     if (q.chart === "heatmap") {
       return '<div class="card chart-card"><h3>' + esc(queryTitle(q)) + '</h3>' + heatmapChartForQuery(q) + '</div>';
     }
@@ -1332,6 +1604,7 @@
       periodSeg() +
       '<button class="btn ghost" onclick="Lumiere.exportCSV()">⬇ ' + t("export_csv") + '</button></div>';
     html += '<p class="muted" style="margin-bottom:16px">' + t("analytics_builder_note") + '</p>';
+    html += renderNLBox();
     html += renderBuilder();
 
     if (analyticsDraft) {
@@ -1412,6 +1685,16 @@
     s.predefinedRules.forEach(function (r) {
       html += '<label class="rule-row"><span>' + (lang === "es" ? r.label_es : r.label_en) + '</span>' +
         '<input type="checkbox" id="pr_' + r.key + '"' + (r.enabled ? " checked" : "") + ' onchange="Lumiere.togglePredefined(\'' + r.key + '\',this.checked)"></label>';
+    });
+    html += '</div>';
+
+    html += '<div class="card"><h3>🔐 ' + t("receptionist_access") + '</h3>';
+    html += '<p class="muted">' + t("receptionist_access_note") + '</p>';
+    var rsAllowed = s.receptionistSections;
+    PUBLIC_SECTIONS.forEach(function (k) {
+      var on = rsAllowed ? rsAllowed.indexOf(k) > -1 : true;
+      html += '<label class="rule-row"><span>' + t("sec_" + k) + '</span>' +
+        '<input type="checkbox" id="rs_' + k + '"' + (on ? " checked" : "") + ' onchange="Lumiere.toggleReceptionistSection(\'' + k + '\',this.checked)"></label>';
     });
     html += '</div>';
 
@@ -1531,7 +1814,9 @@
     commission: renderCommissionRates,
     reports: renderReports,
     analytics: renderAnalytics,
-    rules: renderRules
+    rules: renderRules,
+    data: renderData,
+    care: renderCare
   };
 
   /* ------------------------- Clock & open/closed ------------------------- */
@@ -1657,8 +1942,9 @@
     return s;
   }
 
-  function downloadFile(name, text) {
-    var blob = new Blob([text], { type: "text/csv;charset=utf-8;" });
+  function downloadFile(name, text, mime) {
+    var type = mime || "text/csv;charset=utf-8;";
+    var blob = new Blob([text], { type: type });
     var url = URL.createObjectURL(blob);
     var a = document.createElement("a");
     a.href = url;
@@ -1682,17 +1968,198 @@
     return rows.map(function (r) { return r.map(csvEscape).join(","); }).join("\n");
   }
 
+  function buildClientsCSV() {
+    var rows = [["ID", "Name", "Line", "Phone", "First visit", "Visits"]];
+    D.clients.forEach(function (c) {
+      rows.push([c.id, c.name, t(c.gender_line === "men" ? "mens" : "womens"), c.phone || "", c.first_visit || "", (c.visits || []).join(" | ")]);
+    });
+    return rows.map(function (r) { return r.map(csvEscape).join(","); }).join("\n");
+  }
+
+  function buildStaffCSV() {
+    var rows = [["ID", "Name", "Role", "Shift", "Status"]];
+    D.staff.forEach(function (s) {
+      rows.push([s.id, s.name, s.role, s.shift || "", s.status || "active"]);
+    });
+    return rows.map(function (r) { return r.map(csvEscape).join(","); }).join("\n");
+  }
+
+  function buildProductsCSV() {
+    var rows = [["Key", "Name (EN)", "Name (ES)", "Price ARS", "Stock", "Reorder"]];
+    Object.keys(D.products).forEach(function (k) {
+      var p = D.products[k];
+      rows.push([k, p.name_en, p.name_es, p.price_ars, p.stock, p.reorder]);
+    });
+    return rows.map(function (r) { return r.map(csvEscape).join(","); }).join("\n");
+  }
+
+  function buildBackupJSON() {
+    return JSON.stringify({
+      app: "lumiere-pos", version: 1, exportedAt: new Date().toISOString(),
+      data: D,
+      analyticsQueries: analyticsQueries ? clone(analyticsQueries) : []
+    }, null, 2);
+  }
+
+  function buildMarkdown() {
+    var L = [];
+    var push = function () {
+      L.push.apply(L, Array.prototype.slice.call(arguments));
+      L.push("");
+    };
+    push("# Lumiere POS — Records export");
+    push("> Generated " + new Date().toLocaleString() + " · prices in ARS");
+
+    push("## Clients (" + D.clients.length + ")");
+    push("| ID | Name | Line | Phone | First visit | Visits |");
+    push("|---|---|---|---|---|---|");
+    D.clients.forEach(function (c) {
+      push("| " + c.id + " | " + c.name + " | " + (c.gender_line || "") + " | " + (c.phone || "") + " | " + (c.first_visit || "") + " | " + ((c.visits || []).length) + " |");
+    });
+
+    push("## Staff (" + D.staff.length + ")");
+    push("| ID | Name | Role | Shift | Status |");
+    push("|---|---|---|---|---|");
+    D.staff.forEach(function (s) {
+      push("| " + s.id + " | " + s.name + " | " + s.role + " | " + (s.shift || "") + " | " + (s.status || "active") + " |");
+    });
+
+    push("## Services (" + Object.keys(D.services).length + ")");
+    push("| Key | Name | Group | Price ARS |");
+    push("|---|---|---|---|");
+    Object.keys(D.services).forEach(function (k) {
+      push("| " + k + " | " + svcName(k) + " | " + D.services[k].group + " | " + D.services[k].price_ars + " |");
+    });
+
+    push("## Products (" + Object.keys(D.products).length + ")");
+    push("| Key | Name | Stock | Reorder | Price ARS |");
+    push("|---|---|---|---|---|");
+    Object.keys(D.products).forEach(function (k) {
+      var p = D.products[k];
+      push("| " + k + " | " + prodName(k) + " | " + p.stock + " | " + p.reorder + " | " + p.price_ars + " |");
+    });
+
+    var sales = D.tickets.slice().sort(function (a, b) { return a.date < b.date ? -1 : 1; });
+    push("## Sales (" + sales.length + ")");
+    push("| Date | Seq | Client | Stylist | Total ARS | Items |");
+    push("|---|---|---|---|---|---|");
+    sales.forEach(function (tk) {
+      var c = clientById(tk.client), s = staffById(tk.stylist);
+      var items = tk.lines.map(function (l) {
+        return (l.t === "service" ? svcName(l.k) : prodName(l.k)) + " x" + l.q;
+      }).join(", ");
+      push("| " + tk.date + " | " + tk.seq + " | " + (c ? c.name : tk.client) + " | " + (s ? s.name : tk.stylist) + " | " + ticketTotal(tk) + " | " + items + " |");
+    });
+
+    push("## Appointments (" + D.appointments.length + ")");
+    push("| Date | Time | Client | Stylist | Service | Status |");
+    push("|---|---|---|---|---|---|");
+    D.appointments.slice().sort(function (a, b) { return (a.date + a.time) < (b.date + b.time) ? -1 : 1; }).forEach(function (a) {
+      var c = clientById(a.client), s = staffById(a.stylist);
+      push("| " + a.date + " | " + a.time + " | " + (c ? c.name : a.client) + " | " + (s ? s.name : a.stylist) + " | " + svcName(a.service) + " | " + a.status + " |");
+    });
+
+    return L.join("\n");
+  }
+
   /* ------------------------- window.Lumiere API ------------------------- */
 
   window.Lumiere = {
     navigate: navigate,
-    newAppointment: function () { alert(t("demo_new_appt")); },
 
     addCheckoutLine: addCheckoutLine,
     removeCheckoutLine: removeCheckoutLine,
     completeCheckout: completeCheckout,
 
     exportCSV: function () { downloadFile("lumiere-sales.csv", buildSalesCSV()); },
+    exportClientsCSV: function () { downloadFile("lumiere-clients.csv", buildClientsCSV()); },
+    exportStaffCSV: function () { downloadFile("lumiere-staff.csv", buildStaffCSV()); },
+    exportProductsCSV: function () { downloadFile("lumiere-products.csv", buildProductsCSV()); },
+
+    exportBackup: function () { downloadFile("lumiere-backup.json", buildBackupJSON(), "application/json"); },
+    exportMarkdown: function () { downloadFile("lumiere-records.md", buildMarkdown(), "text/markdown;charset=utf-8"); },
+
+    importBackup: function () {
+      var input = document.getElementById("dataImport");
+      var file = input && input.files && input.files[0];
+      var msg = document.getElementById("dataMsg");
+      if (!file) { if (msg) msg.textContent = t("data_pick_file"); return; }
+      var reader = new FileReader();
+      reader.onload = function (ev) {
+        try {
+          var parsed = JSON.parse(ev.target.result);
+          var data = parsed.data || parsed;
+          if (!data.clients || !data.tickets || !data.staff || !data.services || !data.products) throw new Error("shape");
+          if (!data.settings || !data.meta) throw new Error("shape");
+          D = data;
+          if (parsed.analyticsQueries && Array.isArray(parsed.analyticsQueries)) {
+            analyticsQueries = clone(parsed.analyticsQueries);
+            saveQueries();
+          }
+          state.today = D.meta.today; state.weekStart = D.meta.weekStart; state.weekEnd = D.meta.weekEnd;
+          editTarget = null; checkout = { client: "", stylist: "", assistant: "", lines: [], payments: {} };
+          save();
+          if (msg) msg.textContent = t("data_restored");
+          render(); toast(t("data_restored"));
+        } catch (e) {
+          if (msg) msg.textContent = t("data_bad_file");
+        }
+      };
+      reader.readAsText(file);
+    },
+    resetData: function () {
+      if (!confirm(t("data_reset_confirm"))) return;
+      D = clone(SEED);
+      analyticsQueries = null;
+      apptViewDate = "";
+      state.today = D.meta.today; state.weekStart = D.meta.weekStart; state.weekEnd = D.meta.weekEnd;
+      editTarget = null; checkout = { client: "", stylist: "", assistant: "", lines: [], payments: {} };
+      save(); render(); toast(t("data_reset_done"));
+    },
+
+    restockProduct: function (k) {
+      var p = D.products[k];
+      if (!p) return;
+      p.stock = Math.max(p.reorder || D.settings.lowStockDefault || 5, 1) * 2;
+      save(); render(); toast(t("restocked"));
+    },
+
+    startAppointmentForm: function (mode, id) { editTarget = { kind: "appointment", mode: mode || "add", id: id || null }; render(); },
+    saveAppointment: function () {
+      var date = inputVal("apDate", "").trim();
+      var time = inputVal("apTime", "").trim();
+      var client = inputVal("apClient", "");
+      var service = inputVal("apSvc", "");
+      var stylist = inputVal("apStylist", "");
+      var msg = document.getElementById("apMsg");
+      var fail = function (m) { if (msg) msg.textContent = m; };
+      if (!date || !time) return fail(t("appt_need_date_time"));
+      var open = toMin(D.settings.openTime), close = toMin(D.settings.closeTime), tm = toMin(time);
+      if (tm < open || tm > close) return fail(t("appt_outside_hours"));
+      var exclude = editTarget.id || null;
+      var conflict = D.appointments.some(function (a) {
+        return a.id !== exclude && a.date === date && a.time === time && a.stylist === stylist && a.status !== "cancelled";
+      });
+      if (conflict) return fail(t("appt_conflict"));
+      if (editTarget.id) {
+        var a = appointmentById(editTarget.id);
+        if (a) {
+          a.date = date; a.time = time; a.client = client; a.service = service; a.stylist = stylist;
+          if (editTarget.mode === "edit") a.status = inputVal("apStatus", a.status);
+        }
+      } else {
+        D.appointments.push({ id: "app-" + Date.now(), date: date, time: time, client: client, stylist: stylist, service: service, status: "booked" });
+      }
+      apptViewDate = date;
+      save(); editTarget = null; render(); toast(t("saved_changes"));
+    },
+    setAppointmentStatus: function (id, status) {
+      var a = appointmentById(id);
+      if (!a) return;
+      a.status = status;
+      save(); render();
+    },
+    cancelAppointment: function (id) { this.setAppointmentStatus(id, "cancelled"); },
 
     filterClients: function (q) {
       searchQ = q || "";
@@ -1722,11 +2189,13 @@
       } else {
         D.clients.push({ id: nextClientId(), name: name, gender_line: gender, phone: phone, first_visit: state.today, visits: [], status: "active" });
       }
-      save(); editTarget = null; render();
+      save(); editTarget = null; render(); toast(t("saved_changes"));
     },
     deleteClient: function (id) {
-      D.clients = D.clients.filter(function (c) { return c.id !== id; });
-      save(); render();
+      var c = clientById(id);
+      if (!confirmDelete(c ? c.name : id)) return;
+      D.clients = D.clients.filter(function (x) { return x.id !== id; });
+      save(); render(); toast(t("deleted"));
     },
 
     saveStaff: function () {
@@ -1742,12 +2211,14 @@
         var id = r + "-" + (String(D.staff.length + 1).padStart(3, "0")) + "-" + slug(name);
         D.staff.push({ id: id, name: name, role: r, shift: sh, status: st });
       }
-      save(); editTarget = null; render();
+      save(); editTarget = null; render(); toast(t("saved_changes"));
     },
     deleteStaff: function (id) {
-      D.staff = D.staff.filter(function (s) { return s.id !== id; });
+      var s = staffById(id);
+      if (!confirmDelete(s ? s.name : id)) return;
+      D.staff = D.staff.filter(function (x) { return x.id !== id; });
       delete D.commissionRates[id];
-      save(); render();
+      save(); render(); toast(t("deleted"));
     },
 
     saveService: function () {
@@ -1764,11 +2235,12 @@
         while (D.services[key]) key += "-" + Math.floor(Math.random() * 90 + 10);
         D.services[key] = { name_en: nameEn, name_es: nameEs || nameEn, group: grp, price_ars: price };
       }
-      save(); editTarget = null; render();
+      save(); editTarget = null; render(); toast(t("saved_changes"));
     },
     deleteService: function (k) {
+      if (!confirmDelete(svcName(k))) return;
       delete D.services[k];
-      save(); render();
+      save(); render(); toast(t("deleted"));
     },
 
     saveProduct: function () {
@@ -1786,11 +2258,12 @@
         while (D.products[key]) key += "-" + Math.floor(Math.random() * 90 + 10);
         D.products[key] = { name_en: nameEn, name_es: nameEs || nameEn, price_ars: price, stock: stock, reorder: reorder };
       }
-      save(); editTarget = null; render();
+      save(); editTarget = null; render(); toast(t("saved_changes"));
     },
     deleteProduct: function (k) {
+      if (!confirmDelete(prodName(k))) return;
       delete D.products[k];
-      save(); render();
+      save(); render(); toast(t("deleted"));
     },
 
     saveRates: function () {
@@ -1799,7 +2272,16 @@
         var pv = parseFloat(inputVal("rate_" + s.id + "_p", "0"));
         D.commissionRates[s.id] = { service: isNaN(sv) ? 0 : sv, product: isNaN(pv) ? 0 : pv };
       });
-      save(); render();
+      save(); render(); toast(t("saved_changes"));
+    },
+
+    toggleReceptionistSection: function (secKey, checked) {
+      var list = D.settings.receptionistSections;
+      if (!Array.isArray(list)) list = D.settings.receptionistSections = PUBLIC_SECTIONS.slice();
+      var idx = list.indexOf(secKey);
+      if (checked && idx === -1) list.push(secKey);
+      if (!checked && idx > -1) list.splice(idx, 1);
+      save();
     },
 
     setAnalyticsPeriod: function (p) {
@@ -1818,6 +2300,53 @@
       readDraftFromForm();
       lastQueryResult = analyticsGroups(analyticsDraft);
       render();
+    },
+    runNaturalQuery: function () {
+      var input = document.getElementById("nlInput");
+      var text = (input ? input.value : "").trim();
+      if (!text) return;
+      var res = NaturalQuery.parse(text, D, lang);
+      if (!res || res.type !== "query") {
+        nlText = text;
+        render();
+        var msg = document.getElementById("nlMsg");
+        if (msg) msg.innerHTML = '<p class="muted">' + t("nl_unknown") + '</p><div class="nl-suggestions">' +
+          nlSuggestList().map(function (x, i) {
+            return '<button class="chip" onclick="Lumiere.askNatural(' + i + ')">' + esc(x) + '</button>';
+          }).join("") + '</div>';
+        return;
+      }
+      nlText = text;
+      analyticsDraft = res.q;
+      lastQueryResult = analyticsGroups(res.q);
+      render();
+      var msg2 = document.getElementById("nlMsg");
+      if (msg2) msg2.innerHTML = '<p class="nl-confirm">' + esc(res.summary) + '</p>';
+      toast(res.summary);
+    },
+    askNatural: function (i) {
+      var list = nlSuggestList();
+      if (!list[i]) return;
+      var input = document.getElementById("nlInput");
+      if (input) input.value = list[i];
+      this.runNaturalQuery();
+    },
+    startVoice: function () {
+      try {
+        if (!NaturalQuery.speechSupported()) { toast(t("nl_voice_unsupported")); return; }
+        var mic = document.getElementById("nlMic");
+        if (mic) mic.textContent = "⏺ " + t("nl_listening");
+        NaturalQuery.recognize(lang, function (txt) {
+          var input = document.getElementById("nlInput");
+          if (input) input.value = txt;
+          var m = document.getElementById("nlMsg");
+          if (m) m.innerHTML = "";
+          Lumiere.runNaturalQuery();
+        }, function () {
+          var micEl = document.getElementById("nlMic");
+          if (micEl) micEl.textContent = "🎤 " + t("nl_mic");
+        }, function () { toast(t("nl_error")); });
+      } catch (e) { toast(t("nl_error")); }
     },
     saveAnalyticsQuery: function () {
       readDraftFromForm();
@@ -1906,7 +2435,7 @@
 
   document.addEventListener("change", function (e) {
     if (e.target && e.target.id === "apptDate") {
-      state.today = e.target.value;
+      apptViewDate = e.target.value;
       render();
     }
   });
@@ -1929,6 +2458,14 @@
   });
 
   setInterval(updateClock, 1000);
+
+  if (typeof navigator !== "undefined" && "serviceWorker" in navigator &&
+      typeof location !== "undefined" &&
+      (location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1")) {
+    window.addEventListener("load", function () {
+      navigator.serviceWorker.register("sw.js").catch(function () {});
+    });
+  }
 
   render();
   updateClock();
